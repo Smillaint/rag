@@ -1,0 +1,18 @@
+# Python cache and local runtime files
+__pycache__/
+*.py[cod]
+
+# Local secrets and API keys
+.env
+.env.*
+!.env.example
+key.txt
+keys.txt
+secret.txt
+secrets.txt
+*.key
+
+# Generated/local data stores
+data/
+vectorstore/
+
