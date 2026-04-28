@@ -1,0 +1,10 @@
+pymupdf
+langchain-core
+langchain-community
+langchain-text-splitters
+langchain-huggingface
+chromadb
+sentence-transformers
+rank-bm25
+jieba
+openai

@@ -1,36 +1,51 @@
 # -*- coding: utf-8 -*-
-# src/loader.py
-
-import fitz  # pymupdf
 from pathlib import Path
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+import fitz  # PyMuPDF
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
-def load_pdfs(pdf_dir: str) -> list:
-    """加载目录下所有 PDF"""
-    docs = []
-    for pdf_path in Path(pdf_dir).glob("*.pdf"):
-        pdf = fitz.open(str(pdf_path))
-        text = ""
-        for page in pdf:
-            text += page.get_text()
-        if text.strip():
-            docs.append(Document(
-                page_content=text,
-                metadata={"source": pdf_path.name}
-            ))
-    print(f"共加载 {len(docs)} 个文档")
+def load_pdfs(pdf_dir: str) -> list[Document]:
+    """Load PDFs as page-level Documents with source and page metadata."""
+    docs: list[Document] = []
+    pdf_paths = sorted(Path(pdf_dir).glob("*.pdf"))
+
+    for pdf_path in pdf_paths:
+        with fitz.open(str(pdf_path)) as pdf:
+            for page_index, page in enumerate(pdf, start=1):
+                text = page.get_text().strip()
+                if not text:
+                    continue
+                docs.append(
+                    Document(
+                        page_content=text,
+                        metadata={
+                            "source": pdf_path.name,
+                            "page": page_index,
+                        },
+                    )
+                )
+
+    print(f"Loaded {len(docs)} PDF pages from {pdf_dir}")
     return docs
 
 
-def split_documents(docs: list, chunk_size=512, chunk_overlap=64) -> list:
-    """切分文档为 chunks"""
+def split_documents(
+    docs: list[Document],
+    chunk_size: int = 512,
+    chunk_overlap: int = 64,
+) -> list[Document]:
+    """Split documents into chunks while preserving source metadata."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""]
+        separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""],
     )
     chunks = splitter.split_documents(docs)
-    print(f"切分后共 {len(chunks)} 个 chunk（chunk_size={chunk_size}）")
+
+    for index, chunk in enumerate(chunks):
+        chunk.metadata["chunk_id"] = index
+
+    print(f"Split into {len(chunks)} chunks (chunk_size={chunk_size})")
     return chunks

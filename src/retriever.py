@@ -1,69 +1,106 @@
 # -*- coding: utf-8 -*-
-# src/retriever.py
-
 import os
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"  # 设置国内镜像
+from pathlib import Path
 
-from langchain_huggingface import HuggingFaceEmbeddings  # 新版写法
-from langchain_community.vectorstores import Chroma
-from rank_bm25 import BM25Okapi
-from langchain_core.documents import Document
 import jieba
+from langchain_community.vectorstores import Chroma
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from rank_bm25 import BM25Okapi
+
+
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+
+class BM25Index:
+    """Reusable BM25 index for keyword retrieval."""
+
+    def __init__(self, chunks: list[Document]):
+        self.chunks = chunks
+        tokenized_corpus = [self._tokenize(doc.page_content) for doc in chunks]
+        self.index = BM25Okapi(tokenized_corpus) if tokenized_corpus else None
+
+    @staticmethod
+    def _tokenize(text: str) -> list[str]:
+        return list(jieba.cut(text))
+
+    def search(self, query: str, top_k: int = 5) -> list[Document]:
+        if not self.index:
+            return []
+
+        tokenized_query = self._tokenize(query)
+        scores = self.index.get_scores(tokenized_query)
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+        return [self.chunks[i] for i in top_indices]
 
 
 def get_embedding_model():
-    """加载向量模型（使用国内镜像）"""
-    model = HuggingFaceEmbeddings(
+    """Load the multilingual embedding model."""
+    return HuggingFaceEmbeddings(
         model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        model_kwargs={"device": "cpu"}
+        model_kwargs={"device": "cpu"},
     )
-    return model
 
 
-def build_vectorstore(chunks: list, persist_dir: str = "./vectorstore"):
-    """构建并持久化向量数据库"""
+def build_vectorstore(chunks: list[Document], persist_dir: str = "./vectorstore"):
+    """Build and persist a Chroma vector store."""
+    if not chunks:
+        raise ValueError("No document chunks were provided. Put PDFs in ./data first.")
+
     embedding = get_embedding_model()
     vectorstore = Chroma.from_documents(
         documents=chunks,
         embedding=embedding,
-        persist_directory=persist_dir
+        persist_directory=persist_dir,
     )
-    print(f"向量库构建完成，共 {len(chunks)} 条记录，保存至 {persist_dir}")
+    print(f"Built vector store with {len(chunks)} chunks at {persist_dir}")
     return vectorstore
 
 
 def load_vectorstore(persist_dir: str = "./vectorstore"):
-    """加载已有向量数据库"""
+    """Load an existing Chroma vector store, failing clearly when missing."""
+    if not Path(persist_dir).exists():
+        raise FileNotFoundError(
+            f"Vector store not found at {persist_dir}. Run with --rebuild first."
+        )
+
     embedding = get_embedding_model()
     vectorstore = Chroma(
         persist_directory=persist_dir,
-        embedding_function=embedding
+        embedding_function=embedding,
     )
-    print(f"向量库加载完成")
+    print(f"Loaded vector store from {persist_dir}")
     return vectorstore
 
 
-def bm25_search(chunks: list, query: str, top_k: int = 5) -> list:
-    """BM25 关键词检索"""
-    tokenized_corpus = [list(jieba.cut(doc.page_content)) for doc in chunks]
-    bm25 = BM25Okapi(tokenized_corpus)
-    tokenized_query = list(jieba.cut(query))
-    scores = bm25.get_scores(tokenized_query)
-    top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
-    return [chunks[i] for i in top_indices]
+def bm25_search(chunks: list[Document], query: str, top_k: int = 5) -> list[Document]:
+    """One-off BM25 keyword retrieval. Prefer BM25Index for repeated queries."""
+    return BM25Index(chunks).search(query, top_k=top_k)
 
 
-def hybrid_search(vectorstore, chunks: list, query: str, top_k: int = 5) -> list:
-    """混合检索：向量检索 + BM25，结果合并去重"""
+def hybrid_search(
+    vectorstore,
+    chunks: list[Document],
+    query: str,
+    top_k: int = 5,
+    bm25_index: BM25Index | None = None,
+) -> list[Document]:
+    """Hybrid retrieval: vector search + BM25, merged and de-duplicated."""
     vector_results = vectorstore.similarity_search(query, k=top_k)
-    bm25_results = bm25_search(chunks, query, top_k=top_k)
+    bm25_results = (bm25_index or BM25Index(chunks)).search(query, top_k=top_k)
 
-    seen = set()
-    combined = []
+    seen: set[tuple[str, int | str, int | str]] = set()
+    combined: list[Document] = []
     for doc in vector_results + bm25_results:
-        if doc.page_content not in seen:
-            seen.add(doc.page_content)
-            combined.append(doc)
+        key = (
+            doc.metadata.get("source", ""),
+            doc.metadata.get("page", ""),
+            doc.metadata.get("chunk_id", doc.page_content[:80]),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append(doc)
 
-    print(f"混合检索完成，返回 {len(combined)} 个候选片段")
-    return combined[:top_k * 2]
+    print(f"Hybrid search returned {len(combined)} candidate chunks")
+    return combined[: top_k * 2]
