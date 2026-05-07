@@ -5,7 +5,8 @@ A local Retrieval-Augmented Generation (RAG) project for question answering over
 ## Features
 
 - Loads local PDFs page by page with `source`, `page`, and `chunk_id` metadata.
-- Splits long documents into overlapping chunks for stable retrieval.
+- Splits long documents into overlapping chunks with page-level traceability.
+- Records `chunk_index`, `chunk_in_page`, `char_start`, `char_end`, and `chunk_length` for debugging and citation.
 - Builds a persistent Chroma vector store with multilingual sentence embeddings.
 - Combines dense vector search with BM25 keyword retrieval for better recall.
 - Uses a CrossEncoder reranker to improve final context precision.
@@ -17,7 +18,7 @@ A local Retrieval-Augmented Generation (RAG) project for question answering over
 ```text
 PDF files
   -> PyMuPDF page extraction
-  -> Recursive chunking
+  -> Recursive chunking with page/offset metadata
   -> Chroma vector index + BM25 keyword index
   -> Hybrid candidate retrieval
   -> CrossEncoder reranking
@@ -95,7 +96,13 @@ python main.py
 Optional parameters:
 
 ```powershell
-python main.py --data-dir ./data --vectorstore-dir ./vectorstore --model deepseek-chat "Your question"
+python main.py --data-dir ./data --vectorstore-dir ./vectorstore --model deepseek-chat --chunk-size 512 --chunk-overlap 64 "Your question"
+```
+
+When changing chunking parameters, rebuild the vector store:
+
+```powershell
+python main.py --rebuild --chunk-size 768 --chunk-overlap 96 "Your question"
 ```
 
 ## Evaluate Retrieval

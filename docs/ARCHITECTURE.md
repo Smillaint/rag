@@ -5,7 +5,7 @@
 ```text
 Local PDFs
   -> load_pdfs()
-  -> split_documents()
+  -> split_documents() with page/offset metadata
   -> build_vectorstore() + BM25Index
   -> hybrid_search()
   -> rerank()
@@ -16,6 +16,7 @@ Local PDFs
 
 - `PyMuPDF` is used for PDF extraction because it is lightweight and preserves page-level iteration.
 - `RecursiveCharacterTextSplitter` keeps chunks around a fixed size while respecting paragraph and sentence boundaries when possible.
+- Chunk metadata includes global chunk index, per-page chunk index, character offsets, and chunk length, making retrieval results easier to debug and cite.
 - `Chroma` provides persistent local vector search, so embeddings do not need to be rebuilt for every run.
 - `BM25` complements vector retrieval for exact keywords, names, acronyms, and technical terms.
 - `CrossEncoder` reranking scores `(query, passage)` pairs directly, improving precision before LLM generation.

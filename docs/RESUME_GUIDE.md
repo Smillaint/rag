@@ -15,6 +15,7 @@ Python, LangChain, ChromaDB, HuggingFace Embeddings, SentenceTransformers CrossE
 ## 简历 Bullet 示例
 
 - 设计并实现本地 PDF RAG 问答链路，完成 PDF 解析、文本切分、向量索引构建、混合检索、精排和答案生成的端到端流程。
+- 优化文档分片策略，基于段落、换行、中文标点和重叠窗口进行递归切分，并记录 `source/page/chunk_in_page/char_start/char_end` 元数据，支持检索结果定位和调参分析。
 - 采用 Chroma 向量检索与 BM25 关键词检索融合，提高中文/中英混合文档场景下的召回稳定性，并通过去重逻辑保留 `source/page/chunk_id` 元数据用于溯源。
 - 引入 CrossEncoder Reranker 对候选片段二次排序，将生成阶段上下文控制在 Top-K 高相关片段，降低无关上下文干扰。
 - 基于 OpenAI 兼容接口接入 DeepSeek 模型，设计只基于检索片段回答的提示词，并要求输出引用片段编号，减少幻觉风险。
@@ -23,7 +24,7 @@ Python, LangChain, ChromaDB, HuggingFace Embeddings, SentenceTransformers CrossE
 ## 面试讲解顺序
 
 1. 先讲业务目标：把本地 PDF 变成可问答的知识库，并且回答要能追溯到原文页码。
-2. 再讲架构：PDF 解析 -> chunk -> 向量库/BM25 -> 混合召回 -> rerank -> LLM 生成。
+2. 再讲架构：PDF 解析 -> 带页码和字符偏移的 chunk -> 向量库/BM25 -> 混合召回 -> rerank -> LLM 生成。
 3. 重点讲取舍：只用向量检索容易漏掉专有名词，只用 BM25 对语义问题不稳定，所以做混合检索。
 4. 讲可靠性：保留元数据、提示词约束、引用 chunk、评测脚本。
 5. 讲后续优化：可加入 query rewrite、多路召回权重、RAGAS/人工标注集、FastAPI 服务化和前端上传入口。
