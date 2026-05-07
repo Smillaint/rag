@@ -1,10 +1,46 @@
-# rag
+# Local PDF RAG Assistant
 
-一个本地 PDF RAG 问答示例。流程包括 PDF 读取、文本切块、Chroma 向量检索、BM25 关键词检索、CrossEncoder 精排，以及 DeepSeek/OpenAI 兼容接口生成答案。
+A local Retrieval-Augmented Generation (RAG) project for question answering over PDF documents. It supports PDF parsing, chunking, hybrid retrieval, CrossEncoder reranking, and answer generation through an OpenAI-compatible chat API such as DeepSeek.
 
-## 安装
+## Features
 
-建议先创建虚拟环境：
+- Loads local PDFs page by page with `source`, `page`, and `chunk_id` metadata.
+- Splits long documents into overlapping chunks for stable retrieval.
+- Builds a persistent Chroma vector store with multilingual sentence embeddings.
+- Combines dense vector search with BM25 keyword retrieval for better recall.
+- Uses a CrossEncoder reranker to improve final context precision.
+- Generates grounded answers with chunk citations and anti-hallucination prompting.
+- Provides a lightweight retrieval evaluation script for measurable project results.
+
+## Architecture
+
+```text
+PDF files
+  -> PyMuPDF page extraction
+  -> Recursive chunking
+  -> Chroma vector index + BM25 keyword index
+  -> Hybrid candidate retrieval
+  -> CrossEncoder reranking
+  -> OpenAI-compatible LLM answer generation
+```
+
+Core modules:
+
+```text
+src/
+  loader.py       PDF loading and chunking
+  retriever.py    Chroma, BM25, and hybrid retrieval
+  reranker.py     CrossEncoder reranking
+  generator.py    OpenAI-compatible answer generation
+  chain.py        End-to-end RAGPipeline orchestration
+  evaluate.py     Retrieval evaluation CLI
+main.py           Command-line entry point
+examples/         Example evaluation cases
+```
+
+## Setup
+
+Create a virtual environment and install dependencies:
 
 ```powershell
 python -m venv .venv
@@ -12,68 +48,80 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## 本地数据
-
-把 PDF 文件放到本地 `data/` 目录。`data/` 已经加入 `.gitignore`，不会提交到 GitHub。
+Put PDF files in the local `data/` directory:
 
 ```text
 data/
   your-document.pdf
 ```
 
-## API Key 配置
+`data/` and `vectorstore/` are ignored by Git because they contain local documents and generated indexes.
 
-不要把 API key、token、secret 等敏感信息提交到 Git。仓库已经通过 `.gitignore` 忽略 `.env`、`key.txt`、`*.key` 等本地密钥文件。
+## API Key
 
-运行前在本地环境变量中配置 API key：
+Set a local API key before running generation:
 
 ```powershell
 $env:DEEPSEEK_API_KEY="your_api_key_here"
 ```
 
-如果 API key 已经上传到 GitHub，请立即在对应平台作废/轮换这个 key。`.gitignore` 只能防止后续继续提交，不能从 GitHub 历史记录中移除已经泄露的密钥。
+The code uses the OpenAI Python SDK with an OpenAI-compatible endpoint. By default it targets DeepSeek:
 
-## 运行
-
-首次运行或 PDF 变化后，重建向量库：
-
-```powershell
-python main.py --rebuild "你的问题"
+```text
+base_url = https://api.deepseek.com
+model    = deepseek-chat
 ```
 
-后续可以直接复用本地 `vectorstore/`：
+## Run
+
+Rebuild the vector store after adding or changing PDFs:
 
 ```powershell
-python main.py "联邦学习如何保护数据隐私？"
+python main.py --rebuild "What is this document about?"
 ```
 
-不传问题会进入交互模式：
+Reuse the existing local vector store:
+
+```powershell
+python main.py "How does the document describe privacy protection?"
+```
+
+Start interactive mode:
 
 ```powershell
 python main.py
 ```
 
-可选参数：
+Optional parameters:
 
 ```powershell
-python main.py --data-dir ./data --vectorstore-dir ./vectorstore --model deepseek-chat "你的问题"
+python main.py --data-dir ./data --vectorstore-dir ./vectorstore --model deepseek-chat "Your question"
 ```
 
-## 目录结构
+## Evaluate Retrieval
 
-```text
-src/
-  loader.py       # PDF 按页读取，切分 chunk，并保留 source/page/chunk_id
-  retriever.py    # Chroma 向量库、BM25Index、混合检索
-  reranker.py     # CrossEncoder 精排
-  generator.py    # OpenAI 兼容接口生成答案
-  chain.py        # 端到端 RAGPipeline
-main.py           # 命令行入口
-test_*.py         # 手动验证脚本
+Create JSONL evaluation cases in `examples/eval_questions.jsonl`:
+
+```jsonl
+{"question":"What is the core topic?","expected_sources":["paper.pdf"],"expected_keywords":["retrieval"]}
 ```
 
-## 注意
+Run retrieval evaluation:
 
-- `vectorstore/` 是本地生成的向量库，已被 Git 忽略。
-- `data/` 是本地文档目录，已被 Git 忽略。
-- 首次下载 embedding/reranker 模型需要联网；代码默认设置了 `HF_ENDPOINT=https://hf-mirror.com`。
+```powershell
+python -m src.evaluate --eval-file ./examples/eval_questions.jsonl --skip-rerank
+```
+
+Use full reranking when the CrossEncoder model is available locally or can be downloaded:
+
+```powershell
+python -m src.evaluate --eval-file ./examples/eval_questions.jsonl
+```
+
+The report includes pass rate, source hit, keyword hit, and returned source metadata.
+
+## Notes
+
+- First-time embedding or reranker model loading may require network access.
+- The default Hugging Face endpoint is set to `https://hf-mirror.com` for easier model downloads in China.
+- Do not commit API keys, local PDFs, or generated vector stores.

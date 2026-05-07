@@ -12,12 +12,12 @@ if not API_KEY:
 pipeline = RAGPipeline.from_paths(api_key=API_KEY)
 
 queries = [
-    "联邦学习如何保护数据隐私？",
-    "项目中使用了什么硬件加速方案？",
-    "数据选择算法的核心指标是什么？",
+    "What is the core topic of the document?",
+    "Which workflow or method does the document describe?",
+    "What are the key metrics or criteria mentioned in the document?",
 ]
 
 for query in queries:
     print(f"\n{'=' * 50}")
-    print(f"问题：{query}")
-    print(f"回答：\n{pipeline.ask(query)}")
+    print(f"Question: {query}")
+    print(f"Answer:\n{pipeline.ask(query)}")

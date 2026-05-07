@@ -36,25 +36,26 @@ def _format_source(metadata: dict) -> str:
 def generate_answer(client, model: str, query: str, docs: list) -> str:
     """Generate an answer from retrieved and reranked context documents."""
     if not docs:
-        return "文档中未找到相关内容"
+        return "No relevant content was found in the documents."
 
     context_parts = []
     for i, doc in enumerate(docs, start=1):
         source = _format_source(doc.metadata)
-        context_parts.append(f"[片段{i}]（来源：{source}）\n{doc.page_content}")
+        context_parts.append(f"[Chunk {i}] (source: {source})\n{doc.page_content}")
     context = "\n\n".join(context_parts)
 
     system_prompt = (
-        "你是一个专业的文档问答助手。"
-        "请根据检索到的文档片段，准确、简洁地回答用户问题。"
-        "如果文档中没有相关信息，请直接说'文档中未找到相关内容'，不要编造答案。"
+        "You are a document-grounded QA assistant. Answer only from the retrieved "
+        "document chunks. Keep the answer concise and cite chunk numbers such as "
+        "[Chunk 1]. If the chunks do not contain the answer, say that no relevant "
+        "content was found in the documents. Do not invent facts."
     )
 
     user_prompt = (
-        "请根据以下文档片段回答问题。\n\n"
-        f"【文档片段】\n{context}\n\n"
-        f"【用户问题】\n{query}\n\n"
-        "【回答】"
+        "Use the following document chunks to answer the question.\n\n"
+        f"Document chunks:\n{context}\n\n"
+        f"Question:\n{query}\n\n"
+        "Answer:"
     )
 
     response = client.chat.completions.create(

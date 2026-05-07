@@ -40,7 +40,17 @@ def split_documents(
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""],
+        separators=[
+            "\n\n",
+            "\n",
+            "\u3002",
+            "\uff1f",
+            "\uff01",
+            "\uff1b",
+            "\uff0c",
+            " ",
+            "",
+        ],
     )
     chunks = splitter.split_documents(docs)
 

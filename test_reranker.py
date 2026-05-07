@@ -14,7 +14,7 @@ if Path("./vectorstore").exists():
 else:
     vectorstore = build_vectorstore(chunks)
 
-query = "联邦学习如何保护数据隐私"
+query = "How does the document describe the main workflow?"
 candidates = hybrid_search(
     vectorstore,
     chunks,
@@ -26,9 +26,9 @@ candidates = hybrid_search(
 reranker = load_reranker()
 final_results = rerank(reranker, query, candidates, top_k=3)
 
-print("\n--- Rerank 后最终结果 ---")
+print("\n--- Reranked results ---")
 for i, doc in enumerate(final_results, start=1):
-    source = doc.metadata.get("source", "未知")
-    page = doc.metadata.get("page", "未知页")
-    print(f"\n[{i}] 来源: {source}, page: {page}")
+    source = doc.metadata.get("source", "unknown")
+    page = doc.metadata.get("page", "unknown")
+    print(f"\n[{i}] source: {source}, page: {page}")
     print(doc.page_content[:200])
