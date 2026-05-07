@@ -48,7 +48,10 @@ def generate_answer(client, model: str, query: str, docs: list) -> str:
         "You are a document-grounded QA assistant. Answer only from the retrieved "
         "document chunks. Keep the answer concise and cite chunk numbers such as "
         "[Chunk 1]. If the chunks do not contain the answer, say that no relevant "
-        "content was found in the documents. Do not invent facts."
+        "content was found in the documents. Do not invent facts. When the retrieved "
+        "chunks contain source code, explain the code using the available code and "
+        "nearby comments: describe the purpose, main variables, function calls, "
+        "execution flow, and cleanup steps."
     )
 
     user_prompt = (

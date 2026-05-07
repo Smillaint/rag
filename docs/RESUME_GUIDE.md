@@ -18,6 +18,7 @@ Python, LangChain, ChromaDB, HuggingFace Embeddings, SentenceTransformers CrossE
 - 优化文档分片策略，基于段落、换行、中文标点和重叠窗口进行递归切分，并记录 `source/page/chunk_in_page/char_start/char_end` 元数据，支持检索结果定位和调参分析。
 - 采用 Chroma 向量检索与 BM25 关键词检索融合，提高中文/中英混合文档场景下的召回稳定性，并通过去重逻辑保留 `source/page/chunk_id` 元数据用于溯源。
 - 引入 CrossEncoder Reranker 对候选片段二次排序，将生成阶段上下文控制在 Top-K 高相关片段，降低无关上下文干扰。
+- 针对代码解释类问题设计上下文扩展策略，自动识别代码查询并引入相邻 chunk，解决代码块被分片切断导致回答缺失的问题。
 - 基于 OpenAI 兼容接口接入 DeepSeek 模型，设计只基于检索片段回答的提示词，并要求输出引用片段编号，减少幻觉风险。
 - 补充检索评测脚本，支持以 JSONL 配置问题、期望来源和关键词，输出 source hit、keyword hit 与 pass rate，用于量化优化检索效果。
 

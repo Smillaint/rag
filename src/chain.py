@@ -11,6 +11,20 @@ from src.reranker import load_reranker, rerank
 from src.retriever import BM25Index, build_vectorstore, hybrid_search, load_vectorstore
 
 
+CODE_QUERY_KEYWORDS = (
+    "代码",
+    "程序",
+    "函数",
+    "main.c",
+    "demo",
+    "编程",
+    "解释",
+    "code",
+    "function",
+    "program",
+)
+
+
 @dataclass
 class RAGPipeline:
     chunks: list[Document]
@@ -53,7 +67,65 @@ class RAGPipeline:
             model=model,
         )
 
+    @staticmethod
+    def is_code_query(query: str) -> bool:
+        normalized = query.lower()
+        return any(keyword.lower() in normalized for keyword in CODE_QUERY_KEYWORDS)
+
+    @staticmethod
+    def _chunk_key(doc: Document) -> tuple[str, int | str, int | str]:
+        return (
+            str(doc.metadata.get("source", "")),
+            doc.metadata.get("page", ""),
+            doc.metadata.get("chunk_in_page", doc.metadata.get("chunk_id", "")),
+        )
+
+    def expand_with_neighbor_chunks(
+        self,
+        docs: list[Document],
+        before: int = 2,
+        after: int = 3,
+    ) -> list[Document]:
+        """Add adjacent chunks so split code blocks stay complete across pages."""
+        chunk_by_index = {
+            chunk.metadata.get("chunk_index"): chunk
+            for chunk in self.chunks
+            if isinstance(chunk.metadata.get("chunk_index"), int)
+        }
+        expanded: list[Document] = []
+        seen: set[tuple[str, int | str, int | str]] = set()
+
+        for doc in docs:
+            neighbor_docs: list[Document] = []
+            chunk_index = doc.metadata.get("chunk_index")
+            if isinstance(chunk_index, int):
+                for offset in range(-before, after + 1):
+                    neighbor = chunk_by_index.get(chunk_index + offset)
+                    if neighbor is not None:
+                        neighbor_docs.append(neighbor)
+            else:
+                neighbor_docs.append(doc)
+
+            for neighbor in neighbor_docs:
+                key = self._chunk_key(neighbor)
+                if key in seen:
+                    continue
+                seen.add(key)
+                expanded.append(neighbor)
+
+        print(f"Expanded code context to {len(expanded)} chunks")
+        return expanded
+
     def retrieve(self, query: str, retrieve_top_k: int = 5, rerank_top_k: int = 3) -> list[Document]:
+        code_query = self.is_code_query(query)
+        if code_query:
+            retrieve_top_k = max(retrieve_top_k, 12)
+            rerank_top_k = max(rerank_top_k, 6)
+            print(
+                "Code query detected; "
+                f"using retrieve_top_k={retrieve_top_k}, rerank_top_k={rerank_top_k}"
+            )
+
         candidates = hybrid_search(
             self.vectorstore,
             self.chunks,
@@ -61,7 +133,10 @@ class RAGPipeline:
             top_k=retrieve_top_k,
             bm25_index=self.bm25_index,
         )
-        return rerank(self.reranker, query, candidates, top_k=rerank_top_k)
+        docs = rerank(self.reranker, query, candidates, top_k=rerank_top_k)
+        if code_query:
+            return self.expand_with_neighbor_chunks(docs)
+        return docs
 
     def ask(self, query: str, retrieve_top_k: int = 5, rerank_top_k: int = 3) -> str:
         docs = self.retrieve(query, retrieve_top_k=retrieve_top_k, rerank_top_k=rerank_top_k)

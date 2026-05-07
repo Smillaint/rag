@@ -9,6 +9,7 @@ Local PDFs
   -> build_vectorstore() + BM25Index
   -> hybrid_search()
   -> rerank()
+  -> code-aware neighbor expansion
   -> generate_answer()
 ```
 
@@ -20,6 +21,7 @@ Local PDFs
 - `Chroma` provides persistent local vector search, so embeddings do not need to be rebuilt for every run.
 - `BM25` complements vector retrieval for exact keywords, names, acronyms, and technical terms.
 - `CrossEncoder` reranking scores `(query, passage)` pairs directly, improving precision before LLM generation.
+- Code-related questions automatically use a larger retrieval window and include adjacent chunks, which keeps split code blocks and comments together.
 - Source metadata is preserved through the full pipeline to support citations and debugging.
 
 ## Main Extension Points

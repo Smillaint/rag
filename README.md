@@ -10,6 +10,7 @@ A local Retrieval-Augmented Generation (RAG) project for question answering over
 - Builds a persistent Chroma vector store with multilingual sentence embeddings.
 - Combines dense vector search with BM25 keyword retrieval for better recall.
 - Uses a CrossEncoder reranker to improve final context precision.
+- Detects code-related questions and expands adjacent chunks so split code blocks stay complete.
 - Generates grounded answers with chunk citations and anti-hallucination prompting.
 - Provides a lightweight retrieval evaluation script for measurable project results.
 
@@ -22,6 +23,7 @@ PDF files
   -> Chroma vector index + BM25 keyword index
   -> Hybrid candidate retrieval
   -> CrossEncoder reranking
+  -> Code-aware context expansion when needed
   -> OpenAI-compatible LLM answer generation
 ```
 
