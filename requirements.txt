@@ -8,3 +8,5 @@ sentence-transformers
 rank-bm25
 jieba
 openai
+fastapi
+uvicorn

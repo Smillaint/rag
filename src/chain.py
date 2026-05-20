@@ -141,3 +141,28 @@ class RAGPipeline:
     def ask(self, query: str, retrieve_top_k: int = 5, rerank_top_k: int = 3) -> str:
         docs = self.retrieve(query, retrieve_top_k=retrieve_top_k, rerank_top_k=rerank_top_k)
         return generate_answer(self.client, self.model, query, docs)
+
+    def ask_with_sources(
+        self,
+        query: str,
+        retrieve_top_k: int = 5,
+        rerank_top_k: int = 3,
+    ) -> dict:
+        docs = self.retrieve(query, retrieve_top_k=retrieve_top_k, rerank_top_k=rerank_top_k)
+        answer = generate_answer(self.client, self.model, query, docs)
+        return {
+            "answer": answer,
+            "sources": [
+                {
+                    "source": doc.metadata.get("source"),
+                    "page": doc.metadata.get("page"),
+                    "chunk_id": doc.metadata.get("chunk_id"),
+                    "chunk_index": doc.metadata.get("chunk_index"),
+                    "chunk_in_page": doc.metadata.get("chunk_in_page"),
+                    "char_start": doc.metadata.get("char_start"),
+                    "char_end": doc.metadata.get("char_end"),
+                    "preview": doc.page_content[:160],
+                }
+                for doc in docs
+            ],
+        }

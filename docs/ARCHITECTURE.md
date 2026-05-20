@@ -13,6 +13,16 @@ Local PDFs
   -> generate_answer()
 ```
 
+## API Service
+
+`server.py` wraps the pipeline with FastAPI. The service loads `RAGPipeline` once during application startup and reuses the in-memory PDF chunks, BM25 index, vector store handle, reranker, and model client for each request.
+
+Endpoints:
+
+- `GET /health`: readiness check.
+- `GET /stats`: loaded document, page, and chunk statistics.
+- `POST /ask`: question answering with source metadata.
+
 ## Design Choices
 
 - `PyMuPDF` is used for PDF extraction because it is lightweight and preserves page-level iteration.

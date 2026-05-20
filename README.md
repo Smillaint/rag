@@ -38,6 +38,7 @@ src/
   chain.py        端到端 RAGPipeline 编排
   evaluate.py     检索评测命令行工具
 main.py           命令行入口
+server.py         FastAPI 服务入口
 examples/         示例评测问题
 docs/             架构说明和简历包装建议
 ```
@@ -113,6 +114,38 @@ $env:DEEPSEEK_API_KEY="your_api_key_here"
 ```powershell
 .\.venv\Scripts\python.exe main.py --rebuild --chunk-size 768 --chunk-overlap 96 "你的问题"
 ```
+
+## FastAPI 服务化
+
+启动服务：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn server:app --host 127.0.0.1 --port 8000
+```
+
+服务启动时会加载一次 `RAGPipeline`，后续请求复用内存中的 PDF 分片、BM25 索引、向量库和 Reranker，避免每个问题都重复初始化。
+
+健康检查：
+
+```powershell
+curl http://127.0.0.1:8000/health
+```
+
+查看文档统计：
+
+```powershell
+curl http://127.0.0.1:8000/stats
+```
+
+调用问答接口：
+
+```powershell
+curl -X POST http://127.0.0.1:8000/ask `
+  -H "Content-Type: application/json" `
+  -d "{\"query\":\"Dijkstra算法适合解决什么问题？\"}"
+```
+
+接口会返回 `answer` 和 `sources`，其中 `sources` 包含文件名、页码、chunk 编号和片段预览，便于定位答案来源。
 
 ## 代码问答增强
 
