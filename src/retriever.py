@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import shutil
 from pathlib import Path
 
 import jieba
@@ -36,10 +37,22 @@ class BM25Index:
 
 def get_embedding_model():
     """Load the multilingual embedding model."""
-    return HuggingFaceEmbeddings(
-        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        model_kwargs={"device": "cpu"},
-    )
+    model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    try:
+        return HuggingFaceEmbeddings(
+            model_name=model_name,
+            model_kwargs={"device": "cpu"},
+        )
+    except Exception as exc:
+        print(f"Embedding model remote check failed, retrying local cache: {exc}")
+        return HuggingFaceEmbeddings(
+            model_name=model_name,
+            model_kwargs={"device": "cpu", "local_files_only": True},
+        )
+
+
+def _chunk_ids(chunks: list[Document]) -> list[str]:
+    return [str(chunk.metadata.get("chunk_id")) for chunk in chunks]
 
 
 def build_vectorstore(chunks: list[Document], persist_dir: str = "./vectorstore"):
@@ -52,6 +65,7 @@ def build_vectorstore(chunks: list[Document], persist_dir: str = "./vectorstore"
         documents=chunks,
         embedding=embedding,
         persist_directory=persist_dir,
+        ids=_chunk_ids(chunks),
     )
     print(f"Built vector store with {len(chunks)} chunks at {persist_dir}")
     return vectorstore
@@ -70,6 +84,40 @@ def load_vectorstore(persist_dir: str = "./vectorstore"):
         embedding_function=embedding,
     )
     print(f"Loaded vector store from {persist_dir}")
+    return vectorstore
+
+
+def sync_vectorstore(
+    chunks: list[Document],
+    persist_dir: str,
+    changed_sources: list[str],
+    deleted_chunk_ids: list[str],
+    full_rebuild: bool = False,
+):
+    """Load or update Chroma using stable chunk IDs."""
+    vectorstore_path = Path(persist_dir)
+    if full_rebuild:
+        if vectorstore_path.exists():
+            shutil.rmtree(vectorstore_path)
+        return build_vectorstore(chunks, persist_dir=persist_dir)
+    if not vectorstore_path.exists():
+        return build_vectorstore(chunks, persist_dir=persist_dir)
+
+    vectorstore = load_vectorstore(persist_dir)
+    if deleted_chunk_ids:
+        vectorstore.delete(ids=deleted_chunk_ids)
+        print(f"Deleted {len(deleted_chunk_ids)} stale chunks from vector store")
+
+    changed = set(changed_sources)
+    new_chunks = [
+        chunk
+        for chunk in chunks
+        if chunk.metadata.get("source") in changed
+    ]
+    if new_chunks:
+        vectorstore.add_documents(new_chunks, ids=_chunk_ids(new_chunks))
+        print(f"Added {len(new_chunks)} changed chunks to vector store")
+
     return vectorstore
 
 

@@ -15,4 +15,5 @@ secrets.txt
 # Generated/local data stores
 data/
 vectorstore/
+.rag_cache/
 

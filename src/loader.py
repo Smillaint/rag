@@ -25,22 +25,30 @@ def load_pdfs(pdf_dir: str) -> list[Document]:
     pdf_paths = sorted(Path(pdf_dir).glob("*.pdf"))
 
     for pdf_path in pdf_paths:
-        with fitz.open(str(pdf_path)) as pdf:
-            for page_index, page in enumerate(pdf, start=1):
-                text = page.get_text().strip()
-                if not text:
-                    continue
-                docs.append(
-                    Document(
-                        page_content=text,
-                        metadata={
-                            "source": pdf_path.name,
-                            "page": page_index,
-                        },
-                    )
-                )
+        docs.extend(load_pdf_file(pdf_path))
 
     print(f"Loaded {len(docs)} PDF pages from {pdf_dir}")
+    return docs
+
+
+def load_pdf_file(pdf_path: str | Path) -> list[Document]:
+    """Load a single PDF as page-level Documents."""
+    path = Path(pdf_path)
+    docs: list[Document] = []
+    with fitz.open(str(path)) as pdf:
+        for page_index, page in enumerate(pdf, start=1):
+            text = page.get_text().strip()
+            if not text:
+                continue
+            docs.append(
+                Document(
+                    page_content=text,
+                    metadata={
+                        "source": path.name,
+                        "page": page_index,
+                    },
+                )
+            )
     return docs
 
 
@@ -64,7 +72,20 @@ def split_documents(
         add_start_index=True,
     )
     chunks = splitter.split_documents(docs)
+    assign_chunk_metadata(chunks)
 
+    stats = summarize_chunks(chunks)
+    print(
+        "Split into "
+        f"{stats['total_chunks']} chunks "
+        f"(chunk_size={chunk_size}, overlap={chunk_overlap}, "
+        f"avg_len={stats['avg_length']:.1f}, max_len={stats['max_length']})"
+    )
+    return chunks
+
+
+def assign_chunk_metadata(chunks: list[Document]) -> None:
+    """Assign stable source/page chunk metadata after splitting or merging chunks."""
     per_page_counts: dict[tuple[str, int | str], int] = {}
     for index, chunk in enumerate(chunks):
         source = str(chunk.metadata.get("source", "unknown"))
@@ -81,15 +102,6 @@ def split_documents(
         chunk.metadata["chunk_in_page"] = chunk_in_page
         chunk.metadata["chunk_id"] = f"{source}:p{page}:c{chunk_in_page}"
         chunk.metadata["chunk_length"] = len(chunk.page_content)
-
-    stats = summarize_chunks(chunks)
-    print(
-        "Split into "
-        f"{stats['total_chunks']} chunks "
-        f"(chunk_size={chunk_size}, overlap={chunk_overlap}, "
-        f"avg_len={stats['avg_length']:.1f}, max_len={stats['max_length']})"
-    )
-    return chunks
 
 
 def summarize_chunks(chunks: list[Document]) -> dict:

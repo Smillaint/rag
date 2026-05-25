@@ -6,9 +6,9 @@ from pathlib import Path
 from langchain_core.documents import Document
 
 from src.generator import generate_answer, load_generator
-from src.loader import load_pdfs, split_documents
+from src.index_cache import load_or_update_chunks
 from src.reranker import load_reranker, rerank
-from src.retriever import BM25Index, build_vectorstore, hybrid_search, load_vectorstore
+from src.retriever import BM25Index, hybrid_search, sync_vectorstore
 
 
 CODE_QUERY_KEYWORDS = (
@@ -45,23 +45,31 @@ class RAGPipeline:
         model: str = "deepseek-chat",
         chunk_size: int = 512,
         chunk_overlap: int = 64,
+        cache_dir: str = "./.rag_cache",
     ) -> "RAGPipeline":
-        docs = load_pdfs(data_dir)
-        chunks = split_documents(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-
         vectorstore_path = Path(vectorstore_dir)
         if rebuild and vectorstore_path.exists():
             shutil.rmtree(vectorstore_path)
 
-        if rebuild or not vectorstore_path.exists():
-            vectorstore = build_vectorstore(chunks, persist_dir=vectorstore_dir)
-        else:
-            vectorstore = load_vectorstore(vectorstore_dir)
+        index_result = load_or_update_chunks(
+            data_dir=data_dir,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            cache_dir=cache_dir,
+            force_rebuild=rebuild,
+        )
+        vectorstore = sync_vectorstore(
+            chunks=index_result.chunks,
+            persist_dir=vectorstore_dir,
+            changed_sources=index_result.changed_sources,
+            deleted_chunk_ids=index_result.deleted_chunk_ids,
+            full_rebuild=rebuild or index_result.full_rebuild,
+        )
 
         return cls(
-            chunks=chunks,
+            chunks=index_result.chunks,
             vectorstore=vectorstore,
-            bm25_index=BM25Index(chunks),
+            bm25_index=BM25Index(index_result.chunks),
             reranker=load_reranker(),
             client=load_generator(api_key=api_key, base_url=base_url, model=model)[0],
             model=model,

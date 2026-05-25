@@ -6,6 +6,7 @@
 Local PDFs
   -> load_pdfs()
   -> split_documents() with page/offset metadata
+  -> chunk cache and incremental index sync
   -> build_vectorstore() + BM25Index
   -> hybrid_search()
   -> rerank()
@@ -33,6 +34,7 @@ Endpoints:
 - `CrossEncoder` reranking scores `(query, passage)` pairs directly, improving precision before LLM generation.
 - Code-related questions automatically use a larger retrieval window and include adjacent chunks, which keeps split code blocks and comments together.
 - Source metadata is preserved through the full pipeline to support citations and debugging.
+- Chunk records are cached in `.rag_cache/chunks.jsonl` with a PDF file manifest. Startup can reuse cached chunks, while changed PDFs are re-parsed and synchronized into Chroma by stable chunk IDs.
 
 ## Main Extension Points
 

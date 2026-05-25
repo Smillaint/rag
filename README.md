@@ -7,6 +7,8 @@
 - 按页读取本地 PDF，并保留 `source`、`page`、`chunk_id` 等元数据。
 - 基于段落、换行、中文标点和重叠窗口进行递归分片。
 - 为每个 chunk 记录 `chunk_index`、`chunk_in_page`、`char_start`、`char_end`、`chunk_length`，便于调试、溯源和后续评测。
+- 将 chunk 结果缓存到 `.rag_cache/`，服务启动时优先复用缓存，避免重复解析 PDF。
+- 根据 PDF 文件大小和修改时间做增量索引，新增/修改/删除文档时只同步受影响 chunk。
 - 使用 Chroma 构建可持久化的本地向量库。
 - 融合向量检索和 BM25 关键词检索，提高中文/中英混合文档的召回稳定性。
 - 使用 CrossEncoder Reranker 对候选片段进行精排，提高最终上下文相关性。
@@ -60,7 +62,7 @@ data/
   your-document.pdf
 ```
 
-`data/` 和 `vectorstore/` 已加入 `.gitignore`，不会上传到 GitHub。
+`data/`、`vectorstore/` 和 `.rag_cache/` 已加入 `.gitignore`，不会上传到 GitHub。
 
 ## API Key 配置
 
@@ -114,6 +116,8 @@ $env:DEEPSEEK_API_KEY="your_api_key_here"
 ```powershell
 .\.venv\Scripts\python.exe main.py --rebuild --chunk-size 768 --chunk-overlap 96 "你的问题"
 ```
+
+默认 chunk 缓存目录是 `.rag_cache/`。如果 PDF 没有变化，启动时会直接加载缓存；如果新增、修改或删除 PDF，只会重新解析变化的文件，并同步更新向量库。
 
 ## FastAPI 服务化
 
@@ -189,4 +193,5 @@ curl -X POST http://127.0.0.1:8000/ask `
 - 首次加载 embedding/reranker 模型可能需要联网。
 - 默认 Hugging Face endpoint 设置为 `https://hf-mirror.com`，便于国内环境下载模型。
 - 不要提交 API key、本地 PDF、生成的向量库或 `.venv`。
+- `.rag_cache/` 是本地生成的 chunk 缓存，也不需要提交。
 - 日常问答不要加 `--rebuild`，否则会重新计算所有 chunk 的 embedding，耗时较长。

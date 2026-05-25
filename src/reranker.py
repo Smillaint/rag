@@ -9,7 +9,11 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 def load_reranker(model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
     """Load the CrossEncoder reranker model."""
-    model = CrossEncoder(model_name, max_length=512)
+    try:
+        model = CrossEncoder(model_name, max_length=512)
+    except Exception as exc:
+        print(f"Reranker remote check failed, retrying local cache: {exc}")
+        model = CrossEncoder(model_name, max_length=512, local_files_only=True)
     print("Reranker model loaded")
     return model
 

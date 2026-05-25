@@ -34,6 +34,7 @@ def build_pipeline() -> RAGPipeline:
         api_key=api_key,
         data_dir=os.getenv("RAG_DATA_DIR", "./data"),
         vectorstore_dir=os.getenv("RAG_VECTORSTORE_DIR", "./vectorstore"),
+        cache_dir=os.getenv("RAG_CACHE_DIR", "./.rag_cache"),
         base_url=os.getenv("RAG_BASE_URL", "https://api.deepseek.com"),
         model=os.getenv("RAG_MODEL", "deepseek-chat"),
         chunk_size=int(os.getenv("RAG_CHUNK_SIZE", "512")),

@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument("query", nargs="?", help="Question to ask. If omitted, starts interactive mode.")
     parser.add_argument("--data-dir", default="./data", help="Directory containing local PDF files.")
     parser.add_argument("--vectorstore-dir", default="./vectorstore", help="Chroma persistence directory.")
+    parser.add_argument("--cache-dir", default="./.rag_cache", help="Chunk cache directory.")
     parser.add_argument("--rebuild", action="store_true", help="Rebuild the vector store from PDFs.")
     parser.add_argument("--base-url", default="https://api.deepseek.com", help="OpenAI-compatible API base URL.")
     parser.add_argument("--model", default="deepseek-chat", help="Chat model name.")
@@ -48,6 +49,7 @@ def main():
         api_key=api_key,
         data_dir=args.data_dir,
         vectorstore_dir=args.vectorstore_dir,
+        cache_dir=args.cache_dir,
         rebuild=args.rebuild,
         base_url=args.base_url,
         model=args.model,
