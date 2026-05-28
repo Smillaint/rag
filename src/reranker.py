@@ -20,6 +20,11 @@ def load_reranker(model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
 
 def rerank(model, query: str, docs: list, top_k: int = 3) -> list:
     """Rerank candidate documents and return the top_k most relevant chunks."""
+    return [doc for doc, _ in rerank_with_scores(model, query, docs, top_k=top_k)]
+
+
+def rerank_with_scores(model, query: str, docs: list, top_k: int = 3) -> list[tuple]:
+    """Rerank candidate documents and return documents with CrossEncoder scores."""
     if not docs:
         return []
 
@@ -27,6 +32,5 @@ def rerank(model, query: str, docs: list, top_k: int = 3) -> list:
     scores = model.predict(pairs)
     ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
 
-    top_docs = [doc for _, doc in ranked[:top_k]]
     print(f"Rerank selected top {top_k} from {len(docs)} candidates")
-    return top_docs
+    return [(doc, float(score)) for score, doc in ranked[:top_k]]

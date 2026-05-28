@@ -16,6 +16,7 @@ Python, LangChain, ChromaDB, HuggingFace Embeddings, SentenceTransformers CrossE
 
 - 设计并实现本地 PDF RAG 问答链路，完成 PDF 解析、文本切分、向量索引构建、混合检索、精排和答案生成的端到端流程。
 - 基于 FastAPI 将 CLI 版 RAG 系统服务化，启动时常驻加载分片、BM25、向量库和 Reranker，避免每次请求重复初始化，并提供 `/ask`、`/health`、`/stats` 接口。
+- 增加问答链路可观测 trace，记录召回数量、精排数量、代码查询触发、rerank 分数和检索/精排/生成耗时，用于定位召回质量和服务性能瓶颈。
 - 设计本地 chunk 缓存与增量索引机制，基于 PDF 文件大小和修改时间识别变更，仅重新解析和同步新增/修改文档，降低多文档场景下的启动和重建成本。
 - 优化文档分片策略，基于段落、换行、中文标点和重叠窗口进行递归切分，并记录 `source/page/chunk_in_page/char_start/char_end` 元数据，支持检索结果定位和调参分析。
 - 采用 Chroma 向量检索与 BM25 关键词检索融合，提高中文/中英混合文档场景下的召回稳定性，并通过去重逻辑保留 `source/page/chunk_id` 元数据用于溯源。

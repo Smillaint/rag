@@ -23,6 +23,7 @@ Endpoints:
 - `GET /health`: readiness check.
 - `GET /stats`: loaded document, page, and chunk statistics.
 - `POST /ask`: question answering with source metadata.
+- `trace`: `/ask` returns retrieval count, rerank count, code-query mode, timing, and rerank score metadata for debugging retrieval quality and latency.
 
 ## Design Choices
 

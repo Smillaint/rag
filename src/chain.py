@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from langchain_core.documents import Document
 
 from src.generator import generate_answer, load_generator
 from src.index_cache import load_or_update_chunks
-from src.reranker import load_reranker, rerank
+from src.reranker import load_reranker, rerank_with_scores
 from src.retriever import BM25Index, hybrid_search, sync_vectorstore
 
 
@@ -125,7 +126,19 @@ class RAGPipeline:
         return expanded
 
     def retrieve(self, query: str, retrieve_top_k: int = 5, rerank_top_k: int = 3) -> list[Document]:
+        docs, _ = self.retrieve_with_trace(query, retrieve_top_k, rerank_top_k)
+        return docs
+
+    def retrieve_with_trace(
+        self,
+        query: str,
+        retrieve_top_k: int = 5,
+        rerank_top_k: int = 3,
+    ) -> tuple[list[Document], dict]:
+        started_at = time.perf_counter()
         code_query = self.is_code_query(query)
+        requested_retrieve_top_k = retrieve_top_k
+        requested_rerank_top_k = rerank_top_k
         if code_query:
             retrieve_top_k = max(retrieve_top_k, 12)
             rerank_top_k = max(rerank_top_k, 6)
@@ -134,6 +147,7 @@ class RAGPipeline:
                 f"using retrieve_top_k={retrieve_top_k}, rerank_top_k={rerank_top_k}"
             )
 
+        retrieval_started_at = time.perf_counter()
         candidates = hybrid_search(
             self.vectorstore,
             self.chunks,
@@ -141,10 +155,46 @@ class RAGPipeline:
             top_k=retrieve_top_k,
             bm25_index=self.bm25_index,
         )
-        docs = rerank(self.reranker, query, candidates, top_k=rerank_top_k)
+        retrieval_ms = (time.perf_counter() - retrieval_started_at) * 1000
+
+        rerank_started_at = time.perf_counter()
+        ranked_docs = rerank_with_scores(self.reranker, query, candidates, top_k=rerank_top_k)
+        rerank_ms = (time.perf_counter() - rerank_started_at) * 1000
+        docs = [doc for doc, _ in ranked_docs]
+
+        expansion_ms = 0.0
+        expanded_docs = docs
         if code_query:
-            return self.expand_with_neighbor_chunks(docs)
-        return docs
+            expansion_started_at = time.perf_counter()
+            expanded_docs = self.expand_with_neighbor_chunks(docs)
+            expansion_ms = (time.perf_counter() - expansion_started_at) * 1000
+
+        trace = {
+            "code_query": code_query,
+            "requested_retrieve_top_k": requested_retrieve_top_k,
+            "requested_rerank_top_k": requested_rerank_top_k,
+            "effective_retrieve_top_k": retrieve_top_k,
+            "effective_rerank_top_k": rerank_top_k,
+            "candidate_count": len(candidates),
+            "reranked_count": len(docs),
+            "final_context_count": len(expanded_docs),
+            "timing_ms": {
+                "retrieval": round(retrieval_ms, 2),
+                "rerank": round(rerank_ms, 2),
+                "context_expansion": round(expansion_ms, 2),
+                "retrieve_total": round((time.perf_counter() - started_at) * 1000, 2),
+            },
+            "rerank_scores": [
+                {
+                    "chunk_id": doc.metadata.get("chunk_id"),
+                    "source": doc.metadata.get("source"),
+                    "page": doc.metadata.get("page"),
+                    "score": round(score, 4),
+                }
+                for doc, score in ranked_docs
+            ],
+        }
+        return expanded_docs, trace
 
     def ask(self, query: str, retrieve_top_k: int = 5, rerank_top_k: int = 3) -> str:
         docs = self.retrieve(query, retrieve_top_k=retrieve_top_k, rerank_top_k=rerank_top_k)
@@ -156,10 +206,20 @@ class RAGPipeline:
         retrieve_top_k: int = 5,
         rerank_top_k: int = 3,
     ) -> dict:
-        docs = self.retrieve(query, retrieve_top_k=retrieve_top_k, rerank_top_k=rerank_top_k)
+        total_started_at = time.perf_counter()
+        docs, trace = self.retrieve_with_trace(
+            query,
+            retrieve_top_k=retrieve_top_k,
+            rerank_top_k=rerank_top_k,
+        )
+        generation_started_at = time.perf_counter()
         answer = generate_answer(self.client, self.model, query, docs)
+        generation_ms = (time.perf_counter() - generation_started_at) * 1000
+        trace["timing_ms"]["generation"] = round(generation_ms, 2)
+        trace["timing_ms"]["total"] = round((time.perf_counter() - total_started_at) * 1000, 2)
         return {
             "answer": answer,
+            "trace": trace,
             "sources": [
                 {
                     "source": doc.metadata.get("source"),

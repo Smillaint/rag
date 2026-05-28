@@ -18,6 +18,7 @@ class AskRequest(BaseModel):
 
 class AskResponse(BaseModel):
     answer: str
+    trace: dict[str, Any]
     sources: list[dict[str, Any]]
 
 
