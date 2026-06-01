@@ -16,4 +16,5 @@ secrets.txt
 data/
 vectorstore/
 .rag_cache/
+logs/
 

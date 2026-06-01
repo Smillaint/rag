@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
+import re
 
+import jieba
 from sentence_transformers import CrossEncoder
 
 
@@ -23,14 +25,49 @@ def rerank(model, query: str, docs: list, top_k: int = 3) -> list:
     return [doc for doc, _ in rerank_with_scores(model, query, docs, top_k=top_k)]
 
 
+def _query_terms(query: str) -> set[str]:
+    ascii_terms = {
+        term.lower()
+        for term in re.findall(r"[A-Za-z0-9_./#-]{2,}", query)
+        if len(term.strip("-_./#")) >= 2
+    }
+    chinese_terms = {
+        term.strip().lower()
+        for term in jieba.cut(query)
+        if len(term.strip()) >= 2
+    }
+    return ascii_terms | chinese_terms
+
+
+def _lexical_bonus(query: str, text: str) -> float:
+    terms = _query_terms(query)
+    if not terms:
+        return 0.0
+
+    normalized_text = text.lower()
+    matched = [term for term in terms if term in normalized_text]
+    if not matched:
+        return 0.0
+
+    coverage = len(matched) / len(terms)
+    exact_bonus = 0.35 * len(matched)
+    return coverage + exact_bonus
+
+
 def rerank_with_scores(model, query: str, docs: list, top_k: int = 3) -> list[tuple]:
-    """Rerank candidate documents and return documents with CrossEncoder scores."""
+    """Rerank candidates with CrossEncoder plus lexical term boosting."""
     if not docs:
         return []
 
     pairs = [(query, doc.page_content) for doc in docs]
-    scores = model.predict(pairs)
-    ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+    cross_scores = model.predict(pairs)
+    scored = []
+    for cross_score, doc in zip(cross_scores, docs):
+        bonus = _lexical_bonus(query, doc.page_content)
+        final_score = float(cross_score) + bonus
+        scored.append((final_score, doc))
+
+    ranked = sorted(scored, key=lambda x: x[0], reverse=True)
 
     print(f"Rerank selected top {top_k} from {len(docs)} candidates")
     return [(doc, float(score)) for score, doc in ranked[:top_k]]

@@ -8,16 +8,20 @@ from pydantic import BaseModel, Field
 
 from main import load_local_env
 from src.chain import RAGPipeline
+from src.loader import list_pdf_collections
 
 
 class AskRequest(BaseModel):
     query: str = Field(..., min_length=1)
+    collection: str | None = Field(None, description="Limit retrieval to one data subdirectory collection.")
     retrieve_top_k: int = Field(5, ge=1, le=30)
     rerank_top_k: int = Field(3, ge=1, le=20)
+    include_sources: bool = Field(False, description="Return retrieved chunk previews for debugging.")
 
 
 class AskResponse(BaseModel):
     answer: str
+    citations: list[dict[str, Any]]
     trace: dict[str, Any]
     sources: list[dict[str, Any]]
 
@@ -40,6 +44,8 @@ def build_pipeline() -> RAGPipeline:
         model=os.getenv("RAG_MODEL", "deepseek-chat"),
         chunk_size=int(os.getenv("RAG_CHUNK_SIZE", "512")),
         chunk_overlap=int(os.getenv("RAG_CHUNK_OVERLAP", "64")),
+        log_dir=os.getenv("RAG_LOG_DIR", "./logs"),
+        vectorstore_batch_size=int(os.getenv("RAG_VECTORSTORE_BATCH_SIZE", "256")),
     )
 
 
@@ -75,14 +81,22 @@ def health() -> dict:
 def stats() -> dict:
     rag = get_pipeline()
     sources = sorted({str(chunk.metadata.get("source")) for chunk in rag.chunks})
+    collections = sorted({str(chunk.metadata.get("collection", "default")) for chunk in rag.chunks})
     pages = {
         (chunk.metadata.get("source"), chunk.metadata.get("page"))
         for chunk in rag.chunks
     }
+
+
+@app.get("/collections")
+def collections() -> dict:
+    data_dir = os.getenv("RAG_DATA_DIR", "./data")
+    return {"collections": list_pdf_collections(data_dir)}
     return {
         "chunk_count": len(rag.chunks),
         "page_count": len(pages),
         "source_count": len(sources),
+        "collections": collections,
         "sources": sources,
         "model": rag.model,
     }
@@ -91,8 +105,12 @@ def stats() -> dict:
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest) -> dict:
     rag = get_pipeline()
-    return rag.ask_with_sources(
+    result = rag.ask_with_sources(
         request.query,
         retrieve_top_k=request.retrieve_top_k,
         rerank_top_k=request.rerank_top_k,
+        collection=request.collection,
     )
+    if not request.include_sources:
+        result["sources"] = []
+    return result

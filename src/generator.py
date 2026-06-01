@@ -1,5 +1,15 @@
 # -*- coding: utf-8 -*-
+import re
+from dataclasses import dataclass
+
 from openai import OpenAI
+
+
+@dataclass
+class GenerationResult:
+    answer: str
+    mode: str
+    error: str | None = None
 
 
 def load_generator(
@@ -33,10 +43,53 @@ def _format_source(metadata: dict) -> str:
     return ", ".join(parts)
 
 
-def generate_answer(client, model: str, query: str, docs: list) -> str:
-    """Generate an answer from retrieved and reranked context documents."""
+def _query_terms(query: str) -> set[str]:
+    words = {word.lower() for word in re.findall(r"[A-Za-z0-9_./#-]{2,}", query)}
+    chinese_chars = {char for char in query if "\u4e00" <= char <= "\u9fff"}
+    return words | chinese_chars
+
+
+def _split_passages(text: str) -> list[str]:
+    passages = []
+    for part in re.split(r"(?<=[。！？!?；;])|\n+", text):
+        cleaned = " ".join(part.split())
+        if len(cleaned) >= 12:
+            passages.append(cleaned)
+    return passages
+
+
+def generate_extractive_answer(query: str, docs: list, max_passages: int = 5) -> str:
+    """Build a deterministic local answer when the chat model is unavailable."""
     if not docs:
-        return "No relevant content was found in the documents."
+        return "未在本地文档中检索到相关内容。"
+
+    terms = _query_terms(query)
+    scored: list[tuple[float, int, str]] = []
+    for chunk_number, doc in enumerate(docs, start=1):
+        for passage in _split_passages(doc.page_content):
+            normalized = passage.lower()
+            lexical_score = sum(1 for term in terms if term and term.lower() in normalized)
+            if lexical_score == 0:
+                lexical_score = 0.2
+            scored.append((lexical_score, chunk_number, passage))
+
+    if not scored:
+        return "检索到了相关片段，但片段内容过短，无法形成可靠回答。"
+
+    selected = sorted(scored, key=lambda item: item[0], reverse=True)[:max_passages]
+    lines = [
+        "当前大模型生成不可用，以下是基于检索片段的本地抽取式回答："
+    ]
+    for _, chunk_number, passage in selected:
+        lines.append(f"- {passage} [Chunk {chunk_number}]")
+    lines.append("以上内容仅来自检索片段，建议结合引用页码回看原文。")
+    return "\n".join(lines)
+
+
+def generate_answer_result(client, model: str, query: str, docs: list) -> GenerationResult:
+    """Generate an answer and return generation diagnostics for API traces."""
+    if not docs:
+        return GenerationResult(answer="未在本地文档中检索到相关内容。", mode="empty_context")
 
     context_parts = []
     for i, doc in enumerate(docs, start=1):
@@ -61,14 +114,27 @@ def generate_answer(client, model: str, query: str, docs: list) -> str:
         "Answer:"
     )
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.3,
-        max_tokens=1024,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=1024,
+        )
+    except Exception as exc:
+        return GenerationResult(
+            answer=generate_extractive_answer(query, docs),
+            mode="local_extractive_fallback",
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
-    return response.choices[0].message.content
+    content = response.choices[0].message.content or ""
+    return GenerationResult(answer=content, mode="llm")
+
+
+def generate_answer(client, model: str, query: str, docs: list) -> str:
+    """Generate an answer from retrieved and reranked context documents."""
+    return generate_answer_result(client, model, query, docs).answer

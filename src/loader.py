@@ -19,21 +19,51 @@ CHUNK_SEPARATORS = [
 ]
 
 
+def _relative_pdf_metadata(pdf_path: Path, data_root: Path | None = None) -> dict:
+    root = data_root or pdf_path.parent
+    try:
+        relative_path = pdf_path.relative_to(root)
+    except ValueError:
+        relative_path = Path(pdf_path.name)
+
+    source_path = relative_path.as_posix()
+    collection = relative_path.parts[0] if len(relative_path.parts) > 1 else "default"
+    return {
+        "source": pdf_path.name,
+        "source_path": source_path,
+        "collection": collection,
+    }
+
+
 def load_pdfs(pdf_dir: str) -> list[Document]:
-    """Load PDFs as page-level Documents with source and page metadata."""
+    """Load PDFs recursively as page-level Documents with trace metadata."""
     docs: list[Document] = []
-    pdf_paths = sorted(Path(pdf_dir).glob("*.pdf"))
+    data_root = Path(pdf_dir)
+    pdf_paths = sorted(data_root.rglob("*.pdf"))
 
     for pdf_path in pdf_paths:
-        docs.extend(load_pdf_file(pdf_path))
+        docs.extend(load_pdf_file(pdf_path, data_root=data_root))
 
     print(f"Loaded {len(docs)} PDF pages from {pdf_dir}")
     return docs
 
 
-def load_pdf_file(pdf_path: str | Path) -> list[Document]:
+def list_pdf_collections(pdf_dir: str) -> dict[str, list[str]]:
+    """Return available collections and PDF source paths under a data directory."""
+    data_root = Path(pdf_dir)
+    collections: dict[str, list[str]] = {}
+    for pdf_path in sorted(data_root.rglob("*.pdf")):
+        metadata = _relative_pdf_metadata(pdf_path, data_root)
+        collection = str(metadata["collection"])
+        collections.setdefault(collection, []).append(str(metadata["source_path"]))
+    return collections
+
+
+def load_pdf_file(pdf_path: str | Path, data_root: str | Path | None = None) -> list[Document]:
     """Load a single PDF as page-level Documents."""
     path = Path(pdf_path)
+    root = Path(data_root) if data_root is not None else None
+    base_metadata = _relative_pdf_metadata(path, root)
     docs: list[Document] = []
     with fitz.open(str(path)) as pdf:
         for page_index, page in enumerate(pdf, start=1):
@@ -44,7 +74,7 @@ def load_pdf_file(pdf_path: str | Path) -> list[Document]:
                 Document(
                     page_content=text,
                     metadata={
-                        "source": path.name,
+                        **base_metadata,
                         "page": page_index,
                     },
                 )
@@ -89,8 +119,9 @@ def assign_chunk_metadata(chunks: list[Document]) -> None:
     per_page_counts: dict[tuple[str, int | str], int] = {}
     for index, chunk in enumerate(chunks):
         source = str(chunk.metadata.get("source", "unknown"))
+        source_path = str(chunk.metadata.get("source_path", source))
         page = chunk.metadata.get("page", "unknown")
-        page_key = (source, page)
+        page_key = (source_path, page)
         chunk_in_page = per_page_counts.get(page_key, 0)
         per_page_counts[page_key] = chunk_in_page + 1
 
@@ -100,14 +131,15 @@ def assign_chunk_metadata(chunks: list[Document]) -> None:
             chunk.metadata["char_end"] = char_start + len(chunk.page_content)
         chunk.metadata["chunk_index"] = index
         chunk.metadata["chunk_in_page"] = chunk_in_page
-        chunk.metadata["chunk_id"] = f"{source}:p{page}:c{chunk_in_page}"
+        chunk.metadata["chunk_id"] = f"{source_path}:p{page}:c{chunk_in_page}"
         chunk.metadata["chunk_length"] = len(chunk.page_content)
 
 
 def summarize_chunks(chunks: list[Document]) -> dict:
     """Return lightweight chunk statistics for debugging and tuning."""
     lengths = [len(chunk.page_content) for chunk in chunks]
-    sources = {chunk.metadata.get("source") for chunk in chunks}
+    sources = {chunk.metadata.get("source_path", chunk.metadata.get("source")) for chunk in chunks}
+    collections = {chunk.metadata.get("collection", "default") for chunk in chunks}
     pages = {
         (chunk.metadata.get("source"), chunk.metadata.get("page"))
         for chunk in chunks
@@ -116,6 +148,8 @@ def summarize_chunks(chunks: list[Document]) -> dict:
     return {
         "total_chunks": len(chunks),
         "source_count": len(sources),
+        "collection_count": len(collections),
+        "collections": sorted(str(collection) for collection in collections),
         "page_count": len(pages),
         "min_length": min(lengths) if lengths else 0,
         "max_length": max(lengths) if lengths else 0,

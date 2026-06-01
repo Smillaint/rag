@@ -26,6 +26,10 @@ def parse_args():
     parser.add_argument("--data-dir", default="./data", help="Directory containing local PDF files.")
     parser.add_argument("--vectorstore-dir", default="./vectorstore", help="Chroma persistence directory.")
     parser.add_argument("--cache-dir", default="./.rag_cache", help="Chunk cache directory.")
+    parser.add_argument("--log-dir", default="./logs", help="Daily JSONL query log directory.")
+    parser.add_argument("--collection", help="Limit retrieval to one data subdirectory collection.")
+    parser.add_argument("--list-collections", action="store_true", help="List available PDF collections and exit.")
+    parser.add_argument("--show-collection-files", action="store_true", help="Show PDF source paths when listing collections.")
     parser.add_argument("--rebuild", action="store_true", help="Rebuild the vector store from PDFs.")
     parser.add_argument("--base-url", default="https://api.deepseek.com", help="OpenAI-compatible API base URL.")
     parser.add_argument("--model", default="deepseek-chat", help="Chat model name.")
@@ -33,12 +37,45 @@ def parse_args():
     parser.add_argument("--rerank-top-k", type=int, default=3, help="Top K after reranking.")
     parser.add_argument("--chunk-size", type=int, default=512, help="Maximum characters per chunk.")
     parser.add_argument("--chunk-overlap", type=int, default=64, help="Overlapping characters between chunks.")
+    parser.add_argument("--vectorstore-batch-size", type=int, default=256, help="Chroma indexing batch size.")
     return parser.parse_args()
+
+
+def print_collections(data_dir: str, show_files: bool = False) -> dict[str, list[str]]:
+    from src.loader import list_pdf_collections
+
+    collections = list_pdf_collections(data_dir)
+    if not collections:
+        print(f"No PDF collections found under {data_dir}.")
+        return collections
+
+    print("Available collections:")
+    for name, sources in sorted(collections.items()):
+        print(f"  - {name}: {len(sources)} PDF(s)")
+        if show_files:
+            for source in sources[:5]:
+                print(f"      {source}")
+            if len(sources) > 5:
+                print(f"      ... {len(sources) - 5} more")
+    print("Use --collection <name> to ask within a specific collection.")
+    return collections
 
 
 def main():
     load_local_env()
     args = parse_args()
+
+    collections = print_collections(args.data_dir, show_files=args.show_collection_files)
+    if args.list_collections:
+        return
+    if args.collection and args.collection not in collections:
+        available = ", ".join(sorted(collections)) or "none"
+        raise ValueError(
+            f"Unknown collection '{args.collection}'. Available collections: {available}"
+        )
+    if not args.collection:
+        print("No --collection specified; searching all collections.")
+
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         raise RuntimeError("Please set DEEPSEEK_API_KEY before running main.py.")
@@ -55,10 +92,12 @@ def main():
         model=args.model,
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
+        log_dir=args.log_dir,
+        vectorstore_batch_size=args.vectorstore_batch_size,
     )
 
     if args.query:
-        print(pipeline.ask(args.query, args.retrieve_top_k, args.rerank_top_k))
+        print(pipeline.ask(args.query, args.retrieve_top_k, args.rerank_top_k, args.collection))
         return
 
     print("Enter a question, or type exit to quit.")
@@ -68,7 +107,7 @@ def main():
             break
         if not query:
             continue
-        print(pipeline.ask(query, args.retrieve_top_k, args.rerank_top_k))
+        print(pipeline.ask(query, args.retrieve_top_k, args.rerank_top_k, args.collection))
 
 
 if __name__ == "__main__":

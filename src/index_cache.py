@@ -8,7 +8,7 @@ from langchain_core.documents import Document
 from src.loader import assign_chunk_metadata, load_pdf_file, split_documents
 
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 @dataclass
@@ -28,10 +28,15 @@ def _cache_paths(cache_dir: str) -> tuple[Path, Path]:
 
 def _pdf_inventory(data_dir: str) -> dict[str, dict]:
     inventory: dict[str, dict] = {}
-    for path in sorted(Path(data_dir).glob("*.pdf")):
+    root = Path(data_dir)
+    for path in sorted(root.rglob("*.pdf")):
         stat = path.stat()
-        inventory[path.name] = {
+        relative_path = path.relative_to(root).as_posix()
+        collection = Path(relative_path).parts[0] if len(Path(relative_path).parts) > 1 else "default"
+        inventory[relative_path] = {
             "name": path.name,
+            "source_path": relative_path,
+            "collection": collection,
             "path": str(path),
             "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
@@ -115,7 +120,7 @@ def load_or_update_chunks(
         changed_sources = sorted(current_files)
         chunks: list[Document] = []
         for source in changed_sources:
-            docs = load_pdf_file(current_files[source]["path"])
+            docs = load_pdf_file(current_files[source]["path"], data_root=data_dir)
             chunks.extend(split_documents(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap))
         assign_chunk_metadata(chunks)
         _save_cache(
@@ -152,16 +157,16 @@ def load_or_update_chunks(
     deleted_chunk_ids = [
         str(chunk.metadata.get("chunk_id"))
         for chunk in cached_chunks
-        if chunk.metadata.get("source") in affected_sources
+        if chunk.metadata.get("source_path", chunk.metadata.get("source")) in affected_sources
     ]
     chunks = [
         chunk
         for chunk in cached_chunks
-        if chunk.metadata.get("source") not in affected_sources
+        if chunk.metadata.get("source_path", chunk.metadata.get("source")) not in affected_sources
     ]
 
     for source in changed_sources:
-        docs = load_pdf_file(current_files[source]["path"])
+        docs = load_pdf_file(current_files[source]["path"], data_root=data_dir)
         chunks.extend(split_documents(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap))
 
     assign_chunk_metadata(chunks)

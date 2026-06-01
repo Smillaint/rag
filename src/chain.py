@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
-import shutil
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from langchain_core.documents import Document
 
-from src.generator import generate_answer, load_generator
+from src.generator import generate_answer_result, load_generator
 from src.index_cache import load_or_update_chunks
+from src.query_log import write_query_log
 from src.reranker import load_reranker, rerank_with_scores
 from src.retriever import BM25Index, hybrid_search, sync_vectorstore
 
@@ -34,6 +33,7 @@ class RAGPipeline:
     reranker: object
     client: object
     model: str
+    log_dir: str
 
     @classmethod
     def from_paths(
@@ -47,11 +47,9 @@ class RAGPipeline:
         chunk_size: int = 512,
         chunk_overlap: int = 64,
         cache_dir: str = "./.rag_cache",
+        log_dir: str = "./logs",
+        vectorstore_batch_size: int = 256,
     ) -> "RAGPipeline":
-        vectorstore_path = Path(vectorstore_dir)
-        if rebuild and vectorstore_path.exists():
-            shutil.rmtree(vectorstore_path)
-
         index_result = load_or_update_chunks(
             data_dir=data_dir,
             chunk_size=chunk_size,
@@ -65,6 +63,7 @@ class RAGPipeline:
             changed_sources=index_result.changed_sources,
             deleted_chunk_ids=index_result.deleted_chunk_ids,
             full_rebuild=rebuild or index_result.full_rebuild,
+            batch_size=vectorstore_batch_size,
         )
 
         return cls(
@@ -74,6 +73,7 @@ class RAGPipeline:
             reranker=load_reranker(),
             client=load_generator(api_key=api_key, base_url=base_url, model=model)[0],
             model=model,
+            log_dir=log_dir,
         )
 
     @staticmethod
@@ -84,7 +84,7 @@ class RAGPipeline:
     @staticmethod
     def _chunk_key(doc: Document) -> tuple[str, int | str, int | str]:
         return (
-            str(doc.metadata.get("source", "")),
+            str(doc.metadata.get("source_path", doc.metadata.get("source", ""))),
             doc.metadata.get("page", ""),
             doc.metadata.get("chunk_in_page", doc.metadata.get("chunk_id", "")),
         )
@@ -107,10 +107,16 @@ class RAGPipeline:
         for doc in docs:
             neighbor_docs: list[Document] = []
             chunk_index = doc.metadata.get("chunk_index")
+            source_key = doc.metadata.get("source_path", doc.metadata.get("source"))
+            collection = doc.metadata.get("collection", "default")
             if isinstance(chunk_index, int):
                 for offset in range(-before, after + 1):
                     neighbor = chunk_by_index.get(chunk_index + offset)
-                    if neighbor is not None:
+                    if (
+                        neighbor is not None
+                        and neighbor.metadata.get("source_path", neighbor.metadata.get("source")) == source_key
+                        and neighbor.metadata.get("collection", "default") == collection
+                    ):
                         neighbor_docs.append(neighbor)
             else:
                 neighbor_docs.append(doc)
@@ -125,8 +131,14 @@ class RAGPipeline:
         print(f"Expanded code context to {len(expanded)} chunks")
         return expanded
 
-    def retrieve(self, query: str, retrieve_top_k: int = 5, rerank_top_k: int = 3) -> list[Document]:
-        docs, _ = self.retrieve_with_trace(query, retrieve_top_k, rerank_top_k)
+    def retrieve(
+        self,
+        query: str,
+        retrieve_top_k: int = 5,
+        rerank_top_k: int = 3,
+        collection: str | None = None,
+    ) -> list[Document]:
+        docs, _ = self.retrieve_with_trace(query, retrieve_top_k, rerank_top_k, collection)
         return docs
 
     def retrieve_with_trace(
@@ -134,6 +146,7 @@ class RAGPipeline:
         query: str,
         retrieve_top_k: int = 5,
         rerank_top_k: int = 3,
+        collection: str | None = None,
     ) -> tuple[list[Document], dict]:
         started_at = time.perf_counter()
         code_query = self.is_code_query(query)
@@ -154,6 +167,7 @@ class RAGPipeline:
             query,
             top_k=retrieve_top_k,
             bm25_index=self.bm25_index,
+            collection=collection,
         )
         retrieval_ms = (time.perf_counter() - retrieval_started_at) * 1000
 
@@ -170,6 +184,7 @@ class RAGPipeline:
             expansion_ms = (time.perf_counter() - expansion_started_at) * 1000
 
         trace = {
+            "collection": collection,
             "code_query": code_query,
             "requested_retrieve_top_k": requested_retrieve_top_k,
             "requested_rerank_top_k": requested_rerank_top_k,
@@ -188,6 +203,8 @@ class RAGPipeline:
                 {
                     "chunk_id": doc.metadata.get("chunk_id"),
                     "source": doc.metadata.get("source"),
+                    "source_path": doc.metadata.get("source_path"),
+                    "collection": doc.metadata.get("collection"),
                     "page": doc.metadata.get("page"),
                     "score": round(score, 4),
                 }
@@ -196,41 +213,82 @@ class RAGPipeline:
         }
         return expanded_docs, trace
 
-    def ask(self, query: str, retrieve_top_k: int = 5, rerank_top_k: int = 3) -> str:
-        docs = self.retrieve(query, retrieve_top_k=retrieve_top_k, rerank_top_k=rerank_top_k)
-        return generate_answer(self.client, self.model, query, docs)
+    def ask(
+        self,
+        query: str,
+        retrieve_top_k: int = 5,
+        rerank_top_k: int = 3,
+        collection: str | None = None,
+    ) -> str:
+        return self.ask_with_sources(
+            query,
+            retrieve_top_k=retrieve_top_k,
+            rerank_top_k=rerank_top_k,
+            collection=collection,
+        )["answer"]
 
     def ask_with_sources(
         self,
         query: str,
         retrieve_top_k: int = 5,
         rerank_top_k: int = 3,
+        collection: str | None = None,
     ) -> dict:
         total_started_at = time.perf_counter()
         docs, trace = self.retrieve_with_trace(
             query,
             retrieve_top_k=retrieve_top_k,
             rerank_top_k=rerank_top_k,
+            collection=collection,
         )
         generation_started_at = time.perf_counter()
-        answer = generate_answer(self.client, self.model, query, docs)
+        generation = generate_answer_result(self.client, self.model, query, docs)
         generation_ms = (time.perf_counter() - generation_started_at) * 1000
         trace["timing_ms"]["generation"] = round(generation_ms, 2)
         trace["timing_ms"]["total"] = round((time.perf_counter() - total_started_at) * 1000, 2)
-        return {
-            "answer": answer,
-            "trace": trace,
-            "sources": [
-                {
-                    "source": doc.metadata.get("source"),
-                    "page": doc.metadata.get("page"),
-                    "chunk_id": doc.metadata.get("chunk_id"),
-                    "chunk_index": doc.metadata.get("chunk_index"),
-                    "chunk_in_page": doc.metadata.get("chunk_in_page"),
-                    "char_start": doc.metadata.get("char_start"),
-                    "char_end": doc.metadata.get("char_end"),
-                    "preview": doc.page_content[:160],
-                }
-                for doc in docs
-            ],
+        trace["generation"] = {
+            "mode": generation.mode,
+            "error": generation.error,
         }
+        sources = [
+            {
+                "source": doc.metadata.get("source"),
+                "source_path": doc.metadata.get("source_path"),
+                "collection": doc.metadata.get("collection", "default"),
+                "page": doc.metadata.get("page"),
+                "chunk_id": doc.metadata.get("chunk_id"),
+                "chunk_index": doc.metadata.get("chunk_index"),
+                "chunk_in_page": doc.metadata.get("chunk_in_page"),
+                "char_start": doc.metadata.get("char_start"),
+                "char_end": doc.metadata.get("char_end"),
+                "preview": doc.page_content[:160],
+            }
+            for doc in docs
+        ]
+        result = {
+            "answer": generation.answer,
+            "trace": trace,
+            "citations": [
+                {
+                    "label": f"[Chunk {index}]",
+                    "source": source.get("source"),
+                    "source_path": source.get("source_path"),
+                    "collection": source.get("collection"),
+                    "page": source.get("page"),
+                    "chunk_id": source.get("chunk_id"),
+                }
+                for index, source in enumerate(sources, start=1)
+            ],
+            "sources": sources,
+        }
+        if self.log_dir:
+            log_path = write_query_log(
+                self.log_dir,
+                query=query,
+                collection=collection,
+                retrieve_top_k=retrieve_top_k,
+                rerank_top_k=rerank_top_k,
+                result=result,
+            )
+            result["trace"]["log_path"] = str(log_path)
+        return result
