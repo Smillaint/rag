@@ -43,7 +43,7 @@ src/
 main.py           命令行入口
 server.py         FastAPI 服务入口
 examples/         示例评测问题
-docs/             架构说明和简历包装建议
+docs/             架构设计、评测方案与开发记录
 ```
 
 ## 环境安装
