@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local PDF RAG Console</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">RG</div>
+          <div>
+            <h1>PDF RAG</h1>
+            <p>Project Console</p>
+          </div>
+        </div>
+
+        <section class="panel compact">
+          <div class="panel-title">
+            <span>运行状态</span>
+            <button id="refreshButton" class="icon-button" title="刷新">↻</button>
+          </div>
+          <dl class="stats-list">
+            <div>
+              <dt>状态</dt>
+              <dd id="statusText">Loading</dd>
+            </div>
+            <div>
+              <dt>Collection</dt>
+              <dd id="collectionCount">-</dd>
+            </div>
+            <div>
+              <dt>Chunks</dt>
+              <dd id="chunkCount">-</dd>
+            </div>
+            <div>
+              <dt>向量库</dt>
+              <dd id="vectorstoreState">-</dd>
+            </div>
+            <div>
+              <dt>关键代码</dt>
+              <dd id="codeFileCount">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="panel compact">
+          <div class="panel-title">
+            <span>知识库</span>
+          </div>
+          <div id="collectionList" class="collection-list"></div>
+        </section>
+
+        <section class="panel compact">
+          <div class="panel-title">
+            <span>关键模块</span>
+          </div>
+          <div id="fileList" class="file-list"></div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <section class="overview-band">
+          <div>
+            <p class="eyebrow">Collection-aware Local RAG</p>
+            <h2 id="projectName">Local PDF RAG QA</h2>
+            <p id="projectSummary" class="summary">
+              加载项目进度和关键代码模块。
+            </p>
+          </div>
+          <div class="top-actions">
+            <a class="action-link" href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+            <a class="action-link" href="/collections" target="_blank" rel="noreferrer">Collections</a>
+          </div>
+        </section>
+
+        <section class="progress-section">
+          <div class="section-title">
+            <h3>项目进度</h3>
+            <span id="branchName" class="muted">-</span>
+          </div>
+          <div id="milestoneList" class="milestone-grid"></div>
+        </section>
+
+        <section class="code-section">
+          <div class="section-title">
+            <div>
+              <h3 id="codeTitle">源码浏览</h3>
+              <p id="codeSummary" class="muted">选择左侧关键模块查看代码。</p>
+            </div>
+            <span id="codePath" class="path-pill">-</span>
+          </div>
+          <div class="code-viewer">
+            <pre id="codeBlock"><code>Loading...</code></pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

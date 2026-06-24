@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import hashlib
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -84,8 +85,8 @@ def load_pdf_file(pdf_path: str | Path, data_root: str | Path | None = None) -> 
 
 def split_documents(
     docs: list[Document],
-    chunk_size: int = 512,
-    chunk_overlap: int = 64,
+    chunk_size: int = 900,
+    chunk_overlap: int = 120,
 ) -> list[Document]:
     """Split documents into chunks while preserving source metadata."""
     if chunk_size <= 0:
@@ -129,9 +130,12 @@ def assign_chunk_metadata(chunks: list[Document]) -> None:
         if isinstance(char_start, int):
             chunk.metadata["char_start"] = char_start
             chunk.metadata["char_end"] = char_start + len(chunk.page_content)
+        content_hash = hashlib.sha256(chunk.page_content.encode("utf-8")).hexdigest()
         chunk.metadata["chunk_index"] = index
         chunk.metadata["chunk_in_page"] = chunk_in_page
-        chunk.metadata["chunk_id"] = f"{source_path}:p{page}:c{chunk_in_page}"
+        chunk.metadata["content_hash"] = content_hash
+        chunk.metadata["logical_chunk_id"] = f"{source_path}:p{page}:c{chunk_in_page}"
+        chunk.metadata["chunk_id"] = f"{source_path}:p{page}:h{content_hash[:12]}:c{chunk_in_page}"
         chunk.metadata["chunk_length"] = len(chunk.page_content)
 
 

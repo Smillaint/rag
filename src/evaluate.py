@@ -15,7 +15,8 @@ if TYPE_CHECKING:
 class EvalCase:
     question: str
     expected_sources: list[str]
-    expected_keywords: list[str]
+    any_keywords: list[str]
+    all_keywords: list[str]
 
 
 def load_eval_cases(path: str) -> list[EvalCase]:
@@ -33,7 +34,8 @@ def load_eval_cases(path: str) -> list[EvalCase]:
                 EvalCase(
                     question=question,
                     expected_sources=payload.get("expected_sources", []),
-                    expected_keywords=payload.get("expected_keywords", []),
+                    any_keywords=payload.get("any_keywords", payload.get("expected_keywords", [])),
+                    all_keywords=payload.get("all_keywords", []),
                 )
             )
     return cases
@@ -51,12 +53,20 @@ def _contains_expected_source(docs: list[Document], expected_sources: list[str])
     )
 
 
-def _contains_expected_keyword(docs: list[Document], expected_keywords: list[str]) -> bool:
-    if not expected_keywords:
+def _contains_any_keyword(docs: list[Document], keywords: list[str]) -> bool:
+    if not keywords:
         return True
 
     combined_text = "\n".join(doc.page_content for doc in docs).lower()
-    return any(keyword.lower() in combined_text for keyword in expected_keywords)
+    return any(keyword.lower() in combined_text for keyword in keywords)
+
+
+def _contains_all_keywords(docs: list[Document], keywords: list[str]) -> bool:
+    if not keywords:
+        return True
+
+    combined_text = "\n".join(doc.page_content for doc in docs).lower()
+    return all(keyword.lower() in combined_text for keyword in keywords)
 
 
 def evaluate_retrieval(
@@ -84,7 +94,9 @@ def evaluate_retrieval(
         )
         docs = rerank(reranker, case.question, candidates, top_k=rerank_top_k) if reranker else candidates[:rerank_top_k]
         source_hit = _contains_expected_source(docs, case.expected_sources)
-        keyword_hit = _contains_expected_keyword(docs, case.expected_keywords)
+        any_keyword_hit = _contains_any_keyword(docs, case.any_keywords)
+        all_keyword_hit = _contains_all_keywords(docs, case.all_keywords)
+        keyword_hit = any_keyword_hit and all_keyword_hit
         passed = source_hit and keyword_hit
         results.append(
             {
@@ -92,6 +104,8 @@ def evaluate_retrieval(
                 "passed": passed,
                 "source_hit": source_hit,
                 "keyword_hit": keyword_hit,
+                "any_keyword_hit": any_keyword_hit,
+                "all_keyword_hit": all_keyword_hit,
                 "returned_sources": [
                     {
                         "source": doc.metadata.get("source"),
@@ -121,6 +135,8 @@ def parse_args():
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--retrieve-top-k", type=int, default=5)
     parser.add_argument("--rerank-top-k", type=int, default=3)
+    parser.add_argument("--chunk-size", type=int, default=900)
+    parser.add_argument("--chunk-overlap", type=int, default=120)
     parser.add_argument("--skip-rerank", action="store_true")
     return parser.parse_args()
 
@@ -132,7 +148,7 @@ def main():
     args = parse_args()
     cases = load_eval_cases(args.eval_file)
     docs = load_pdfs(args.data_dir)
-    chunks = split_documents(docs)
+    chunks = split_documents(docs, chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap)
 
     vectorstore_path = Path(args.vectorstore_dir)
     if args.rebuild or not vectorstore_path.exists():

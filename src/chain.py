@@ -44,11 +44,11 @@ class RAGPipeline:
         rebuild: bool = False,
         base_url: str = "https://api.deepseek.com",
         model: str = "deepseek-chat",
-        chunk_size: int = 512,
-        chunk_overlap: int = 64,
+        chunk_size: int = 900,
+        chunk_overlap: int = 120,
         cache_dir: str = "./.rag_cache",
         log_dir: str = "./logs",
-        vectorstore_batch_size: int = 256,
+        vectorstore_batch_size: int = 128,
     ) -> "RAGPipeline":
         index_result = load_or_update_chunks(
             data_dir=data_dir,

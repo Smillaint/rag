@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +9,7 @@ from langchain_core.documents import Document
 from src.loader import assign_chunk_metadata, load_pdf_file, split_documents
 
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 
 @dataclass
@@ -40,8 +41,17 @@ def _pdf_inventory(data_dir: str) -> dict[str, dict]:
             "path": str(path),
             "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
+            "sha256": _file_sha256(path),
         }
     return inventory
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _document_to_record(doc: Document) -> dict:
@@ -106,8 +116,8 @@ def _cache_is_compatible(
 
 def load_or_update_chunks(
     data_dir: str,
-    chunk_size: int = 512,
-    chunk_overlap: int = 64,
+    chunk_size: int = 900,
+    chunk_overlap: int = 120,
     cache_dir: str = "./.rag_cache",
     force_rebuild: bool = False,
 ) -> IndexUpdateResult:

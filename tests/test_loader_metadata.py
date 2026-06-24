@@ -21,3 +21,6 @@ def test_split_documents_preserves_trace_metadata() -> None:
     assert "chunk_id" in first.metadata
     assert "char_start" in first.metadata
     assert "char_end" in first.metadata
+    assert "content_hash" in first.metadata
+    assert "logical_chunk_id" in first.metadata
+    assert ":h" in first.metadata["chunk_id"]

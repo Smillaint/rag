@@ -35,9 +35,9 @@ def parse_args():
     parser.add_argument("--model", default="deepseek-chat", help="Chat model name.")
     parser.add_argument("--retrieve-top-k", type=int, default=5, help="Top K for vector and BM25 retrieval.")
     parser.add_argument("--rerank-top-k", type=int, default=3, help="Top K after reranking.")
-    parser.add_argument("--chunk-size", type=int, default=512, help="Maximum characters per chunk.")
-    parser.add_argument("--chunk-overlap", type=int, default=64, help="Overlapping characters between chunks.")
-    parser.add_argument("--vectorstore-batch-size", type=int, default=256, help="Chroma indexing batch size.")
+    parser.add_argument("--chunk-size", type=int, default=900, help="Maximum characters per chunk.")
+    parser.add_argument("--chunk-overlap", type=int, default=120, help="Overlapping characters between chunks.")
+    parser.add_argument("--vectorstore-batch-size", type=int, default=128, help="Chroma indexing batch size.")
     return parser.parse_args()
 
 

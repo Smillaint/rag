@@ -1,0 +1,335 @@
+# Local PDF RAG 项目代码答辩要点
+
+用途：这份文档用于面试或项目答辩时按源码解释本项目。回答时不要只讲概念，要把每个能力落到具体文件、函数和真实边界。
+
+
+1. 项目主线怎么讲
+
+一句话：
+这是一个面向本地 PDF 文档的 RAG 问答系统，核心链路是 PDF 按页解析、可追溯 chunk 分片、增量缓存、Chroma 向量召回、BM25 关键词召回、CrossEncoder 精排、代码类问题相邻片段扩展、grounded 生成、sources 和 trace 返回。
+
+代码链路：
+- main.py：CLI 入口，负责参数、collection 选择和交互式提问。
+- server.py：FastAPI 入口，负责 /ask、/stats、/collections、项目进度和代码浏览接口。
+- src/chain.py：RAGPipeline，串联索引、检索、精排、生成、引用和日志。
+- src/loader.py：PDF 读取、分片、chunk 元数据。
+- src/index_cache.py：chunk 缓存、PDF 变更检测、增量更新。
+- src/retriever.py：Chroma 向量库、BM25、混合召回。
+- src/reranker.py：CrossEncoder 精排和词面加权。
+- src/generator.py：OpenAI-compatible LLM 调用、grounded prompt、本地抽取式 fallback。
+- src/query_log.py：按日期写 JSONL 调用链日志。
+- src/evaluate.py：轻量检索评测。
+
+答辩时按这个顺序说：
+PDF 解析 -> 元数据 chunk -> 增量缓存 -> hybrid recall -> rerank -> code context expansion -> grounded generation -> trace/log/eval。
+
+
+2. 为什么记录 source/page/chunk_id/char_start/char_end
+
+对应代码：
+- src/loader.py: load_pdf_file()
+- src/loader.py: split_documents()
+- src/loader.py: assign_chunk_metadata()
+- src/chain.py: ask_with_sources()
+
+回答：
+source 和 source_path 用于定位原始文件；page 用于定位页码；chunk_id 用作向量库记录、检索结果、引用和日志之间的统一 ID；char_start 和 char_end 表示片段在该页抽取文本中的字符范围，方便调试分片边界和做评测；chunk_index 用于代码类问题的相邻片段扩展；preview 用于 API 调试时快速看片段内容。
+
+现在的代码还增加了：
+- content_hash：chunk 文本的 SHA-256 摘要。
+- logical_chunk_id：source_path + page + chunk_in_page 形式的逻辑位置 ID。
+- chunk_id：source_path + page + content_hash 前缀 + chunk_in_page。
+
+不能夸大的点：
+chunk_id 不是绝对永久 ID。如果 PDF 文本抽取结果或分片参数变化，chunk 内容和边界可能变化，ID 也可能变化。更准确的说法是：在 PDF 未修改、分片参数不变时，它是可复现的；加入 content_hash 后，对相同内容片段的识别能力比单纯 chunk_in_page 更强。
+
+
+3. 增量索引怎么实现
+
+对应代码：
+- src/index_cache.py: _pdf_inventory()
+- src/index_cache.py: load_or_update_chunks()
+- src/retriever.py: sync_vectorstore()
+
+真实逻辑：
+启动时递归扫描 data/ 下的 PDF，记录 source_path、collection、文件大小、mtime_ns 和 sha256；然后和 .rag_cache/manifest.json 里的文件清单比较。
+
+如果缓存不存在、缓存版本不兼容、分片参数变化或用户传 --rebuild：
+- 重新解析所有 PDF。
+- 重新生成 chunks.jsonl。
+- 重建 Chroma。
+
+如果只是部分文件变化：
+- 找出新增、修改、删除的 PDF。
+- 从缓存 chunks 中移除受影响文件的旧 chunks。
+- 只重新解析新增或修改的文件。
+- 保存新的 chunks.jsonl。
+- 在 Chroma 中删除 stale chunk ids，并批量写入变更 chunks。
+
+回答：
+我做的是文件级增量，不是 chunk 级 diff。文件未变化时直接复用 chunk 缓存；文件变化时重新解析该文件，删除旧 chunks 并写入新 chunks。这样实现简单，正确性更容易保证。PDF 文本抽取和分片边界容易受前文影响，所以当前项目没有强行做 chunk 级 diff。
+
+追问为什么加 sha256：
+早期只靠 size 和 mtime_ns，速度快，但极端情况下不够强。现在 manifest 里也记录 sha256，能更可靠地识别文件内容变化。代价是启动扫描时需要读一遍 PDF 文件；对于本地知识库规模可以接受。如果到企业级，可以把 hash 计算放到离线索引任务或文件监听事件里。
+
+
+4. 混合检索到底怎么融合
+
+对应代码：
+- src/retriever.py: BM25Index
+- src/retriever.py: hybrid_search()
+- src/chain.py: retrieve_with_trace()
+
+真实实现：
+- Chroma 向量检索取 top_k。
+- BM25 关键词检索取 top_k。
+- 两路结果按向量结果在前、BM25 结果在后的顺序合并。
+- 用 source、page、chunk_id 去重。
+- 最多保留 2 * top_k 个候选。
+- 交给 CrossEncoder 统一精排。
+
+回答：
+当前项目采用的是候选集合级融合，不是分数加权融合。原因是向量相似度和 BM25 分数不在同一尺度，直接相加不可靠。我先让向量检索负责语义召回，BM25 负责精确术语、英文缩写、函数名和数字召回，然后把候选交给 CrossEncoder 精排。
+
+不能说：
+不要说“我实现了向量分数和 BM25 分数的加权融合”。当前代码没有做 score normalization 或 RRF。
+
+改进方向：
+后续可以做 Reciprocal Rank Fusion，也可以对两路分数归一化后加权，再交给 reranker。
+
+
+5. BM25 和向量检索分别解决什么
+
+对应代码：
+- src/retriever.py: BM25Index._tokenize()
+- src/retriever.py: get_embedding_model()
+
+回答：
+向量检索把 query 和 chunk 编码成向量，适合处理语义相似但措辞不同的问题。BM25 是词项检索，适合精确术语、函数名、变量名、协议名、缩写和数字。中文和中英混合技术文档里经常有 Dijkstra、ARP、TCP、main.c 这类词，单靠向量检索可能弱化字面命中，所以我采用 hybrid recall。
+
+BM25 公式怎么解释：
+- TF：词在当前文档出现越多，相关性越高，但会饱和。
+- IDF：词在整个语料越少见，区分度越高。
+- 文档长度归一化：避免长文档因为词多天然占优。
+- k1 控制词频饱和程度。
+- b 控制长度归一化程度。
+
+
+6. Embedding 和 CrossEncoder 的区别
+
+对应代码：
+- src/retriever.py: get_embedding_model()
+- src/reranker.py: load_reranker()
+- src/reranker.py: rerank_with_scores()
+
+当前模型：
+- embedding：sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2。
+- reranker：cross-encoder/ms-marco-MiniLM-L-6-v2。
+
+回答：
+Embedding 模型分别编码 query 和 document，文档向量可以提前入库，因此适合大规模快速召回。CrossEncoder 把 query 和 chunk 拼成一对一起输入模型，能建模两者之间更细的交互，排序通常更准，但每个候选都要推理一次，成本高。因此本项目采用两阶段结构：先用向量和 BM25 召回少量候选，再用 CrossEncoder 精排。
+
+追问为什么不用 CrossEncoder 搜全库：
+CrossEncoder 不能预计算每个文档对任意 query 的交互结果。全库十万 chunk 就意味着每次查询十万次 pair 推理，延迟不可接受。
+
+不能夸大的点：
+ms-marco-MiniLM-L-6-v2 主要来自英文检索数据，不是中文场景最优 reranker。当前选择它是 MVP 阶段为了轻量、CPU 可跑和部署方便。中文正式场景应该替换为中文或多语 reranker，并用评测集重新比较 Recall@K、MRR、source_hit 和 keyword_hit。
+
+
+7. chunk_size 和 overlap 怎么解释
+
+对应代码：
+- main.py: --chunk-size / --chunk-overlap
+- server.py: RAG_CHUNK_SIZE / RAG_CHUNK_OVERLAP
+- src/chain.py: RAGPipeline.from_paths()
+- src/loader.py: split_documents()
+- src/evaluate.py: --chunk-size / --chunk-overlap
+
+当前默认：
+- chunk_size = 900
+- chunk_overlap = 120
+- vectorstore_batch_size = 128
+
+回答：
+这是面向大 PDF 和电子书场景调过的默认值，不是行业标准。较大的 chunk_size 可以减少 chunk 数量和 embedding 写入压力，同时保留较完整上下文；overlap 用于缓解段落和代码在边界被切断。项目支持命令行调整参数，参数变化后会触发缓存版本或 manifest 不兼容，需要重建索引。
+
+追问为什么不用 token 切：
+当前使用 RecursiveCharacterTextSplitter，主要按字符和分隔符切。中文字符数和 token 数有相关性，但不等价。优点是简单、模型无关；缺点是不能精确控制 embedding 或生成模型的 token 上限。正式系统可以换 tokenizer-aware splitter。
+
+
+8. 代码问答增强做了什么
+
+对应代码：
+- src/chain.py: CODE_QUERY_KEYWORDS
+- src/chain.py: is_code_query()
+- src/chain.py: retrieve_with_trace()
+- src/chain.py: expand_with_neighbor_chunks()
+- tests/test_chain_context_expansion.py
+
+真实逻辑：
+如果问题命中“代码、程序、函数、解释、main.c、code、function、program”等关键词：
+- retrieve_top_k 至少提高到 12。
+- rerank_top_k 至少提高到 6。
+- 精排后按 chunk_index 加入前 2、后 3 个相邻片段。
+- 相邻扩展限制在同一个 source_path 和同一个 collection 内，不跨 PDF。
+
+回答：
+普通知识问答可能一个片段就够，但代码解释通常需要函数定义、调用关系、变量初始化和清理逻辑。字符分片容易把函数头和函数体拆开，PDF 还可能跨页。因此我只对代码类问题扩大检索窗口并引入邻接片段，避免所有问题都承担额外上下文成本。
+
+不能夸大的点：
+当前代码类问题识别是规则路由，不是机器学习分类器。优点是简单、可解释、零额外调用；缺点是覆盖不全。后续可以加入查询分类器、代码符号比例判断或文件类型判断。
+
+
+9. grounded prompt 能不能彻底解决幻觉
+
+对应代码：
+- src/generator.py: generate_answer_result()
+- src/chain.py: ask_with_sources()
+
+回答：
+不能。grounded prompt 只能降低幻觉，不能机制性保证绝对忠实。本项目用三层约束降低风险：
+第一，检索阶段提供有 source/page/chunk_id 的 chunks；
+第二，prompt 要求只基于检索片段回答，找不到就说没有相关内容，并引用 Chunk；
+第三，接口返回 citations、sources 和 trace，让用户能核验答案来自哪里。
+
+进一步改进：
+可以做答案句子和证据片段对齐、引用覆盖率检查、无证据拒答评测、冲突来源检测和二次事实校验。
+
+
+10. LLM 用的是什么
+
+对应代码：
+- src/generator.py: load_generator()
+- main.py: --base-url / --model
+- server.py: RAG_BASE_URL / RAG_MODEL
+
+回答：
+默认生成模型是 DeepSeek Chat，通过 OpenAI-compatible API 调用。HuggingFace 不是最终生成 LLM，HuggingFace 主要用于 embedding 和 CrossEncoder reranker 的模型加载与本地缓存回退。项目也支持切换 Qwen、GLM 或其他 OpenAI-compatible 服务，只需要改 base_url 和 model。
+
+LLM 失败怎么办：
+src/generator.py 里捕获 API 异常后，会进入 local_extractive_fallback，只从检索片段中抽取相关句子并保留 Chunk 引用，不会假装生成模型可用。
+
+
+11. sources、trace、log 有什么用
+
+对应代码：
+- src/chain.py: ask_with_sources()
+- src/query_log.py: write_query_log()
+- server.py: AskResponse
+
+sources 返回：
+- source
+- source_path
+- collection
+- page
+- chunk_id
+- chunk_index
+- chunk_in_page
+- char_start
+- char_end
+- preview
+
+trace 返回：
+- collection
+- code_query
+- requested/effective top_k
+- candidate_count
+- reranked_count
+- final_context_count
+- timing_ms
+- rerank_scores
+- generation.mode
+- log_path
+
+回答：
+sources 解决答案可追溯；trace 解决检索链路可调试；JSONL log 解决线上回放和评测沉淀。面试官问“怎么知道是不是原文相关”，就看 sources 的 preview 和 page，再看 trace.rerank_scores 排序是否合理。
+
+
+12. 评测怎么做，当前有什么不足
+
+对应代码：
+- src/evaluate.py: EvalCase
+- src/evaluate.py: evaluate_retrieval()
+- examples/eval_questions.jsonl
+
+当前评测：
+- expected_sources：预期来源文件。
+- any_keywords：命中任意一个即可，适合作为可接受答案集合。
+- all_keywords：必须全部命中，适合作为强约束。
+- source_hit、any_keyword_hit、all_keyword_hit、keyword_hit、pass_rate。
+
+回答：
+当前评测主要是检索层轻量回归测试，用于判断代码改动后是否还能召回正确文档和关键内容。它不能完整证明生成答案质量，因为没有自动判断答案是否完整、忠实和引用一致。
+
+更完整的评测：
+- 检索层：Recall@K、MRR、nDCG、source_hit、keyword_hit。
+- 生成层：答案正确性、faithfulness、citation precision、citation coverage、拒答准确率。
+- LLM-as-Judge 可以辅助，但需要人工标注集校准。
+
+
+13. 遇到矛盾来源怎么办
+
+当前代码边界：
+项目会返回多个 sources 和 citations，但还没有自动 conflict detection。
+
+回答：
+如果检索片段本身互相矛盾，不应该让模型自行拍脑袋。应让系统输出冲突：文档 A 怎么说、文档 B 怎么说，并分别给出引用。如果元数据里有 version、updated_at、collection 优先级，可以按规则选择最新或更权威来源；如果无法裁决，就明确说明当前文档存在冲突，不能给唯一结论。
+
+后续改进：
+为 metadata 增加 version、updated_at、authority；生成前做冲突检测；评测集支持多组可接受答案。
+
+
+14. 大文本能不能扛
+
+已经做的：
+- src/retriever.py: Chroma 分批写入。
+- src/retriever.py: BM25Index 按 collection 懒加载并缓存。
+- src/index_cache.py: chunk JSONL 缓存和文件级增量索引。
+- main.py/server.py/src/chain.py: 默认 chunk_size 900、overlap 120、batch_size 128。
+- collection 过滤同时作用于 Chroma 和 BM25。
+
+回答：
+几十 MB 到百 MB 级本地 PDF 知识库可以作为单机 RAG 承载，但索引应提前离线完成，不能现场第一次启动才重建。到百万级 chunk、多用户并发或权限隔离场景，应把向量检索迁移到 Qdrant/Milvus，把关键词检索迁移到 Elasticsearch/OpenSearch，并增加异步索引、权限过滤、版本管理和监控。
+
+
+15. Python 八股怎么结合代码讲
+
+dataclass：
+- src/chain.py: RAGPipeline
+- src/generator.py: GenerationResult
+- src/index_cache.py: IndexUpdateResult
+- src/evaluate.py: EvalCase
+回答：用于承载结构化中间结果，比 dict 更清晰，比手写 class 更轻量。
+
+with 上下文管理：
+- src/loader.py 读取 PDF。
+- src/query_log.py 写 JSONL。
+- src/index_cache.py 读写缓存。
+回答：保证文件和 PDF 句柄自动释放。
+
+异常处理：
+- src/retriever.py embedding 本地缓存回退。
+- src/reranker.py reranker 本地缓存回退。
+- src/generator.py LLM 失败抽取式 fallback。
+回答：异常处理不是只 print，而是系统降级策略。
+
+Pydantic：
+- server.py: AskRequest / AskResponse。
+回答：校验 query 非空、top_k 范围，防止异常参数进入服务。
+
+set 去重：
+- src/retriever.py: hybrid_search()。
+回答：向量和 BM25 可能召回同一 chunk，所以用 source/page/chunk_id 去重。
+
+pathlib：
+- src/loader.py、src/index_cache.py、server.py。
+回答：比字符串拼路径更清晰，便于处理相对路径、后缀和跨平台路径。
+
+
+16. 一段完整答辩话术
+
+我这个项目不是简单把 PDF 丢给大模型，而是做了完整 RAG 链路。PDF 先由 PyMuPDF 按页读取，再用 RecursiveCharacterTextSplitter 切成带 source_path、collection、page、chunk_id、char_start、char_end、content_hash 的 chunk。索引层通过 manifest 和 chunks.jsonl 做文件级增量缓存，当前还记录 PDF sha256，文件未变化时直接复用缓存，变化时只重建受影响文件的 chunks 并同步 Chroma。
+
+查询时先按 collection 限定检索域，然后做 Chroma 向量召回和 BM25 关键词召回。这里我采用候选集合级融合，不直接把两个分数相加，因为分数尺度不同；合并去重后再用 CrossEncoder 统一精排。代码类问题会自动扩大 topK，并基于 chunk_index 加入同一 PDF 的相邻片段，避免函数或代码块被切断。
+
+生成阶段默认用 DeepSeek Chat 的 OpenAI-compatible API，prompt 限制模型只能基于检索片段回答并引用 Chunk。如果 API 不可用，会走本地抽取式 fallback，不编造答案。接口返回 answer、citations、sources 和 trace，日志按日期写 JSONL，便于回放和调试。评测脚本目前主要验证检索层的 source_hit 和 keyword_hit，后续可以补 Recall@K、MRR、nDCG 和生成忠实度评测。
