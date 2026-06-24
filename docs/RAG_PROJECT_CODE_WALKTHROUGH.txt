@@ -292,7 +292,31 @@ sources 解决答案可追溯；trace 解决检索链路可调试；JSONL log �
 几十 MB 到百 MB 级本地 PDF 知识库可以作为单机 RAG 承载，但索引应提前离线完成，不能现场第一次启动才重建。到百万级 chunk、多用户并发或权限隔离场景，应把向量检索迁移到 Qdrant/Milvus，把关键词检索迁移到 Elasticsearch/OpenSearch，并增加异步索引、权限过滤、版本管理和监控。
 
 
-15. Python 八股怎么结合代码讲
+15. 当前本地文档量怎么回答
+
+对应代码：
+- src/corpus_stats.py: build_corpus_stats()
+- server.py: /stats
+
+当前本地统计口径：
+- PDF 文件数量：18 份。
+- PDF 总页数：2136 页。
+- 原始 PDF 总大小：46.01 MB。
+- chunk 数量：3546 个。
+- 平均 chunk 长度：631.9 字符。
+- chunk 最大长度：900 字符。
+- embedding 模型：sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2。
+- embedding 维度：384。
+- collection 分布：algorithm 8 份、netsec_lab 6 份、pcb 1 份、tcpip 3 份。
+
+回答：
+我目前是在本地可复现测试集上验证，包含 18 份 PDF，共 2136 页，原始文件约 46.01 MB。按当前 900 字符、120 overlap 的分片参数，解析后得到 3546 个 chunks，平均每个 chunk 约 631.9 个字符。embedding 用的是 multilingual MiniLM，向量维度是 384。这个规模属于中小型本地知识库，单机 Chroma + 内存 BM25 可以完成索引和检索，还没到必须使用分布式向量数据库的程度。
+
+追问为什么数据量不大：
+当前项目主要验证的是完整 RAG 链路和工程能力，包括可追溯 chunk、增量索引、混合检索、rerank、引用回答和 trace/log。这个规模能稳定复现功能和调参，但我不会声称已经验证百万级向量性能。如果扩展到百万级 chunk 或多用户并发，需要迁移到专门向量库和 Elasticsearch/OpenSearch，并补充压测和离线评测。
+
+
+16. Python 八股怎么结合代码讲
 
 dataclass：
 - src/chain.py: RAGPipeline
@@ -326,7 +350,7 @@ pathlib：
 回答：比字符串拼路径更清晰，便于处理相对路径、后缀和跨平台路径。
 
 
-16. 一段完整答辩话术
+17. 一段完整答辩话术
 
 我这个项目不是简单把 PDF 丢给大模型，而是做了完整 RAG 链路。PDF 先由 PyMuPDF 按页读取，再用 RecursiveCharacterTextSplitter 切成带 source_path、collection、page、chunk_id、char_start、char_end、content_hash 的 chunk。索引层通过 manifest 和 chunks.jsonl 做文件级增量缓存，当前还记录 PDF sha256，文件未变化时直接复用缓存，变化时只重建受影响文件的 chunks 并同步 Chroma。
 

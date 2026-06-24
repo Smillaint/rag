@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from main import load_local_env
 from src.chain import RAGPipeline
+from src.corpus_stats import build_corpus_stats
 from src.loader import list_pdf_collections
 
 
@@ -139,15 +140,12 @@ def health() -> dict:
 @app.get("/stats")
 def stats() -> dict:
     rag = get_pipeline()
+    data_dir = os.getenv("RAG_DATA_DIR", "./data")
     sources = sorted({str(chunk.metadata.get("source")) for chunk in rag.chunks})
     collections = sorted({str(chunk.metadata.get("collection", "default")) for chunk in rag.chunks})
-    pages = {
-        (chunk.metadata.get("source"), chunk.metadata.get("page"))
-        for chunk in rag.chunks
-    }
+    corpus_stats = build_corpus_stats(data_dir, rag.chunks, rag.model)
     return {
-        "chunk_count": len(rag.chunks),
-        "page_count": len(pages),
+        **corpus_stats,
         "source_count": len(sources),
         "collections": collections,
         "sources": sources,

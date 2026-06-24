@@ -12,6 +12,9 @@ from rank_bm25 import BM25Okapi
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
+EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+EMBEDDING_DIMENSION = 384
+
 
 class BM25Index:
     """Lazy BM25 index for keyword retrieval.
@@ -70,16 +73,15 @@ class BM25Index:
 
 def get_embedding_model():
     """Load the multilingual embedding model."""
-    model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     try:
         return HuggingFaceEmbeddings(
-            model_name=model_name,
+            model_name=EMBEDDING_MODEL_NAME,
             model_kwargs={"device": "cpu"},
         )
     except Exception as exc:
         print(f"Embedding model remote check failed, retrying local cache: {exc}")
         return HuggingFaceEmbeddings(
-            model_name=model_name,
+            model_name=EMBEDDING_MODEL_NAME,
             model_kwargs={"device": "cpu", "local_files_only": True},
         )
 
