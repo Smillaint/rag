@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 import hashlib
+import logging
 from pathlib import Path
 
 import fitz  # PyMuPDF
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+logger = logging.getLogger(__name__)
+
+CHUNK_HASH_LENGTH = 12
 
 CHUNK_SEPARATORS = [
     "\n\n",
@@ -21,6 +25,7 @@ CHUNK_SEPARATORS = [
 
 
 def _relative_pdf_metadata(pdf_path: Path, data_root: Path | None = None) -> dict:
+    """Compute source, source_path, and collection from a PDF path relative to data root."""
     root = data_root or pdf_path.parent
     try:
         relative_path = pdf_path.relative_to(root)
@@ -45,7 +50,7 @@ def load_pdfs(pdf_dir: str) -> list[Document]:
     for pdf_path in pdf_paths:
         docs.extend(load_pdf_file(pdf_path, data_root=data_root))
 
-    print(f"Loaded {len(docs)} PDF pages from {pdf_dir}")
+    logger.info("Loaded %d PDF pages from %s", len(docs), pdf_dir)
     return docs
 
 
@@ -106,11 +111,13 @@ def split_documents(
     assign_chunk_metadata(chunks)
 
     stats = summarize_chunks(chunks)
-    print(
-        "Split into "
-        f"{stats['total_chunks']} chunks "
-        f"(chunk_size={chunk_size}, overlap={chunk_overlap}, "
-        f"avg_len={stats['avg_length']:.1f}, max_len={stats['max_length']})"
+    logger.info(
+        "Split into %d chunks (chunk_size=%d, overlap=%d, avg_len=%.1f, max_len=%d)",
+        stats["total_chunks"],
+        chunk_size,
+        chunk_overlap,
+        stats["avg_length"],
+        stats["max_length"],
     )
     return chunks
 
@@ -135,7 +142,7 @@ def assign_chunk_metadata(chunks: list[Document]) -> None:
         chunk.metadata["chunk_in_page"] = chunk_in_page
         chunk.metadata["content_hash"] = content_hash
         chunk.metadata["logical_chunk_id"] = f"{source_path}:p{page}:c{chunk_in_page}"
-        chunk.metadata["chunk_id"] = f"{source_path}:p{page}:h{content_hash[:12]}:c{chunk_in_page}"
+        chunk.metadata["chunk_id"] = f"{source_path}:p{page}:h{content_hash[:CHUNK_HASH_LENGTH]}:c{chunk_in_page}"
         chunk.metadata["chunk_length"] = len(chunk.page_content)
 
 

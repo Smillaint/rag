@@ -14,7 +14,12 @@ def write_query_log(
     rerank_top_k: int,
     result: dict[str, Any],
 ) -> Path:
-    """Append one JSONL call-chain record to logs/YYYY-MM-DD.jsonl."""
+    """Append one JSONL call-chain record to logs/YYYY-MM-DD.jsonl.
+
+    The record includes the timestamp, query, collection, top-k settings,
+    answer preview, citations, and full trace (timing, fusion scores,
+    rerank scores, HyDE status) for post-hoc debugging and replay.
+    """
     now = datetime.now().astimezone()
     root = Path(log_dir)
     root.mkdir(parents=True, exist_ok=True)

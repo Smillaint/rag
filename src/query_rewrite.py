@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
+import logging
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from openai import OpenAI
 
-@dataclass
-class HyDEResult:
-    document: str | None
-    used: bool
-    elapsed_ms: float
-    error: str | None = None
+logger = logging.getLogger(__name__)
 
+HYDE_MAX_TOKENS = 256
+HYDE_TEMPERATURE = 0.7
 
 SYSTEM_PROMPT = (
     "You are a technical document author. Given a question, write a concise "
@@ -22,12 +23,22 @@ SYSTEM_PROMPT = (
 USER_TEMPLATE = "Question: {query}\n\nPassage:"
 
 
+@dataclass
+class HyDEResult:
+    """Result of HyDE hypothetical document generation."""
+
+    document: str | None
+    used: bool
+    elapsed_ms: float
+    error: str | None = None
+
+
 def generate_hypothetical_document(
-    client,
+    client: "OpenAI",
     model: str,
     query: str,
-    max_tokens: int = 256,
-    temperature: float = 0.7,
+    max_tokens: int = HYDE_MAX_TOKENS,
+    temperature: float = HYDE_TEMPERATURE,
 ) -> HyDEResult:
     """Generate a hypothetical answer document for HyDE vector retrieval.
 
@@ -53,11 +64,11 @@ def generate_hypothetical_document(
             return HyDEResult(
                 document=None, used=False, elapsed_ms=elapsed, error="empty_response"
             )
-        print(f"HyDE generated hypothetical document ({len(doc)} chars)")
+        logger.info("HyDE generated hypothetical document (%d chars)", len(doc))
         return HyDEResult(document=doc, used=True, elapsed_ms=elapsed)
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
-        print(f"HyDE generation failed, falling back to raw query: {exc}")
+        logger.warning("HyDE generation failed, falling back to raw query: %s", exc)
         return HyDEResult(
             document=None,
             used=False,

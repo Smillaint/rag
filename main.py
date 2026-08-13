@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 import argparse
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def load_local_env(path: str = ".env") -> None:
@@ -20,7 +23,8 @@ def load_local_env(path: str = ".env") -> None:
         os.environ.setdefault(key, value)
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the CLI."""
     parser = argparse.ArgumentParser(description="Run PDF RAG question answering.")
     parser.add_argument("query", nargs="?", help="Question to ask. If omitted, starts interactive mode.")
     parser.add_argument("--data-dir", default="./data", help="Directory containing local PDF files.")
@@ -42,6 +46,7 @@ def parse_args():
 
 
 def print_collections(data_dir: str, show_files: bool = False) -> dict[str, list[str]]:
+    """List available PDF collections to stdout and return them as a dict."""
     from src.loader import list_pdf_collections
 
     collections = list_pdf_collections(data_dir)
@@ -61,7 +66,8 @@ def print_collections(data_dir: str, show_files: bool = False) -> dict[str, list
     return collections
 
 
-def main():
+def main() -> None:
+    """Run the CLI: parse args, build the pipeline, and answer questions."""
     load_local_env()
     args = parse_args()
 

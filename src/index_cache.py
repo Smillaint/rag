@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,8 +9,10 @@ from langchain_core.documents import Document
 
 from src.loader import assign_chunk_metadata, load_pdf_file, split_documents
 
+logger = logging.getLogger(__name__)
 
 CACHE_VERSION = 3
+FILE_READ_BLOCK_SIZE = 1024 * 1024
 FILE_FINGERPRINT_FIELDS = (
     "name",
     "source_path",
@@ -22,6 +25,8 @@ FILE_FINGERPRINT_FIELDS = (
 
 @dataclass
 class IndexUpdateResult:
+    """Result of loading or updating the chunk cache."""
+
     chunks: list[Document]
     changed_sources: list[str]
     deleted_sources: list[str]
@@ -31,11 +36,13 @@ class IndexUpdateResult:
 
 
 def _cache_paths(cache_dir: str) -> tuple[Path, Path]:
+    """Return (manifest_path, chunks_path) for a cache directory."""
     root = Path(cache_dir)
     return root / "manifest.json", root / "chunks.jsonl"
 
 
 def _pdf_inventory(data_dir: str) -> dict[str, dict]:
+    """Scan a data directory and return a file inventory with fingerprints."""
     inventory: dict[str, dict] = {}
     root = Path(data_dir)
     for path in sorted(root.rglob("*.pdf")):
@@ -55,14 +62,16 @@ def _pdf_inventory(data_dir: str) -> dict[str, dict]:
 
 
 def _file_sha256(path: Path) -> str:
+    """Compute the SHA-256 hash of a file."""
     digest = hashlib.sha256()
     with path.open("rb") as file:
-        for block in iter(lambda: file.read(1024 * 1024), b""):
+        for block in iter(lambda: file.read(FILE_READ_BLOCK_SIZE), b""):
             digest.update(block)
     return digest.hexdigest()
 
 
 def _same_file_fingerprint(current: dict, cached: dict) -> bool:
+    """Check if two file inventory entries have identical fingerprints."""
     return all(current.get(field) == cached.get(field) for field in FILE_FINGERPRINT_FIELDS)
 
 
@@ -81,6 +90,7 @@ def _record_to_document(record: dict) -> Document:
 
 
 def _load_cache(cache_dir: str) -> tuple[dict | None, list[Document]]:
+    """Load the manifest and chunk list from cache, or (None, []) if missing."""
     manifest_path, chunks_path = _cache_paths(cache_dir)
     if not manifest_path.exists() or not chunks_path.exists():
         return None, []
@@ -101,6 +111,7 @@ def _save_cache(
     manifest: dict,
     chunks: list[Document],
 ) -> None:
+    """Write the manifest and chunk list to cache."""
     manifest_path, chunks_path = _cache_paths(cache_dir)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
@@ -117,6 +128,7 @@ def _cache_is_compatible(
     chunk_size: int,
     chunk_overlap: int,
 ) -> bool:
+    """Check if the cached manifest is compatible with the requested chunk params."""
     if not manifest:
         return False
     return (
@@ -155,7 +167,7 @@ def load_or_update_chunks(
             },
             chunks,
         )
-        print(f"Built chunk cache with {len(chunks)} chunks at {cache_dir}")
+        logger.info("Built chunk cache with %d chunks at %s", len(chunks), cache_dir)
         return IndexUpdateResult(
             chunks=chunks,
             changed_sources=changed_sources,
@@ -206,12 +218,13 @@ def load_or_update_chunks(
     )
 
     if cache_hit:
-        print(f"Loaded {len(chunks)} chunks from cache at {cache_dir}")
+        logger.info("Loaded %d chunks from cache at %s", len(chunks), cache_dir)
     else:
-        print(
-            "Updated chunk cache: "
-            f"{len(changed_sources)} changed, {len(deleted_sources)} deleted, "
-            f"{len(chunks)} total chunks"
+        logger.info(
+            "Updated chunk cache: %d changed, %d deleted, %d total chunks",
+            len(changed_sources),
+            len(deleted_sources),
+            len(chunks),
         )
 
     return IndexUpdateResult(

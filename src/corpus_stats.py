@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -9,8 +10,11 @@ from src.retriever import EMBEDDING_DIMENSION, EMBEDDING_MODEL_NAME
 if TYPE_CHECKING:
     from langchain_core.documents import Document
 
+logger = logging.getLogger(__name__)
+
 
 def _pdf_file_stats(data_dir: str) -> dict:
+    """Count PDFs, pages, sizes, and collections under a data directory."""
     root = Path(data_dir)
     pdf_paths = sorted(root.rglob("*.pdf"))
     total_size_bytes = 0
@@ -27,7 +31,9 @@ def _pdf_file_stats(data_dir: str) -> dict:
             with fitz.open(str(path)) as pdf:
                 total_pages += pdf.page_count
         except Exception as exc:
-            page_read_errors.append(f"{relative_path.as_posix()}: {type(exc).__name__}: {exc}")
+            error_msg = f"{relative_path.as_posix()}: {type(exc).__name__}: {exc}"
+            page_read_errors.append(error_msg)
+            logger.warning("Failed to read PDF page count: %s", error_msg)
 
     return {
         "document_count": len(pdf_paths),
@@ -40,6 +46,7 @@ def _pdf_file_stats(data_dir: str) -> dict:
 
 
 def _chunk_stats(chunks: list["Document"]) -> dict:
+    """Compute chunk-level statistics (count, length distribution, sources)."""
     lengths = [len(chunk.page_content) for chunk in chunks]
     chunk_pages = {
         (chunk.metadata.get("source_path", chunk.metadata.get("source")), chunk.metadata.get("page"))
@@ -60,7 +67,7 @@ def _chunk_stats(chunks: list["Document"]) -> dict:
 
 
 def build_corpus_stats(data_dir: str, chunks: list["Document"], model: str) -> dict:
-    """Return interview-friendly corpus and index statistics."""
+    """Return corpus and index statistics for monitoring and debugging."""
     pdf_stats = _pdf_file_stats(data_dir)
     chunk_stats = _chunk_stats(chunks)
     return {

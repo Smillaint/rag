@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -15,12 +16,23 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
+logger = logging.getLogger(__name__)
+
 EMBEDDING_MODEL_NAME = "BAAI/bge-m3"
 EMBEDDING_DIMENSION = 1024
+
+DEFAULT_CHUNK_SIZE = 900
+DEFAULT_CHUNK_OVERLAP = 120
+DEFAULT_RETRIEVE_TOP_K = 5
+DEFAULT_RERANK_TOP_K = 3
+DEFAULT_VECTORSTORE_BATCH_SIZE = 128
 
 RRF_K = 60
 VECTOR_WEIGHT = 1.0
 BM25_WEIGHT = 1.0
+
+FUSION_CANDIDATE_MULTIPLIER = 2
+CONTENT_FINGERPRINT_LENGTH = 80
 
 
 class BM25Index:
@@ -30,7 +42,7 @@ class BM25Index:
     built on first use and cached per collection.
     """
 
-    def __init__(self, chunks: list[Document]):
+    def __init__(self, chunks: list[Document]) -> None:
         self.chunks = chunks
         self._indexes: dict[str, tuple[list[Document], BM25Okapi | None]] = {}
 
@@ -59,13 +71,13 @@ class BM25Index:
         index = BM25Okapi(tokenized_corpus) if tokenized_corpus else None
         self._indexes[key] = (docs, index)
         scope = f"collection={collection}" if collection else "all collections"
-        print(f"Built BM25 index for {len(docs)} chunks ({scope})")
+        logger.info("Built BM25 index for %d chunks (%s)", len(docs), scope)
         return docs, index
 
     def search(
         self,
         query: str,
-        top_k: int = 5,
+        top_k: int = DEFAULT_RETRIEVE_TOP_K,
         collection: str | None = None,
     ) -> list[Document]:
         """One-shot BM25 retrieval, scores discarded."""
@@ -74,7 +86,7 @@ class BM25Index:
     def search_with_scores(
         self,
         query: str,
-        top_k: int = 5,
+        top_k: int = DEFAULT_RETRIEVE_TOP_K,
         collection: str | None = None,
     ) -> list[tuple[Document, float]]:
         """Return (Document, bm25_score) pairs ranked by relevance."""
@@ -88,7 +100,7 @@ class BM25Index:
         return [(docs[i], float(scores[i])) for i in top_indices]
 
 
-def get_embedding_model():
+def get_embedding_model() -> HuggingFaceEmbeddings:
     """Load the multilingual embedding model (bge-m3, 1024-dim, normalized)."""
     try:
         return HuggingFaceEmbeddings(
@@ -97,7 +109,7 @@ def get_embedding_model():
             encode_kwargs={"normalize_embeddings": True},
         )
     except Exception as exc:
-        print(f"Embedding model remote check failed, retrying local cache: {exc}")
+        logger.warning("Embedding model remote check failed, retrying local cache: %s", exc)
         return HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL_NAME,
             model_kwargs={"device": "cpu", "local_files_only": True},
@@ -113,24 +125,21 @@ def _batched(chunks: list[Document], batch_size: int) -> list[list[Document]]:
     return [chunks[index:index + batch_size] for index in range(0, len(chunks), batch_size)]
 
 
-def _add_documents_in_batches(vectorstore, chunks: list[Document], batch_size: int) -> None:
+def _add_documents_in_batches(vectorstore: Chroma, chunks: list[Document], batch_size: int) -> None:
     if batch_size <= 0:
         raise ValueError("batch_size must be greater than 0.")
     total = len(chunks)
+    total_batches = (total + batch_size - 1) // batch_size
     for batch_number, batch in enumerate(_batched(chunks, batch_size), start=1):
         vectorstore.add_documents(batch, ids=_chunk_ids(batch))
-        print(
-            "Added vector batch "
-            f"{batch_number}/{(total + batch_size - 1) // batch_size} "
-            f"({len(batch)} chunks)"
-        )
+        logger.info("Added vector batch %d/%d (%d chunks)", batch_number, total_batches, len(batch))
 
 
 def build_vectorstore(
     chunks: list[Document],
     persist_dir: str = "./vectorstore",
-    batch_size: int = 256,
-):
+    batch_size: int = DEFAULT_VECTORSTORE_BATCH_SIZE,
+) -> Chroma:
     """Build and persist a Chroma vector store."""
     if not chunks:
         raise ValueError("No document chunks were provided. Put PDFs in ./data first.")
@@ -141,11 +150,11 @@ def build_vectorstore(
         embedding_function=embedding,
     )
     _add_documents_in_batches(vectorstore, chunks, batch_size=batch_size)
-    print(f"Built vector store with {len(chunks)} chunks at {persist_dir}")
+    logger.info("Built vector store with %d chunks at %s", len(chunks), persist_dir)
     return vectorstore
 
 
-def load_vectorstore(persist_dir: str = "./vectorstore"):
+def load_vectorstore(persist_dir: str = "./vectorstore") -> Chroma:
     """Load an existing Chroma vector store, failing clearly when missing."""
     if not Path(persist_dir).exists():
         raise FileNotFoundError(
@@ -157,7 +166,7 @@ def load_vectorstore(persist_dir: str = "./vectorstore"):
         persist_directory=persist_dir,
         embedding_function=embedding,
     )
-    print(f"Loaded vector store from {persist_dir}")
+    logger.info("Loaded vector store from %s", persist_dir)
     return vectorstore
 
 
@@ -171,7 +180,8 @@ def _embedding_model_changed(meta_path: Path) -> bool:
         return True
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read embedding meta %s: %s", meta_path, exc)
         return True
     return (
         meta.get("model") != EMBEDDING_MODEL_NAME
@@ -197,8 +207,8 @@ def sync_vectorstore(
     changed_sources: list[str],
     deleted_chunk_ids: list[str],
     full_rebuild: bool = False,
-    batch_size: int = 256,
-):
+    batch_size: int = DEFAULT_VECTORSTORE_BATCH_SIZE,
+) -> Chroma:
     """Load or update Chroma using stable chunk IDs.
 
     Auto-detects embedding-model changes via a sidecar metadata file and forces
@@ -208,10 +218,11 @@ def sync_vectorstore(
     meta_path = _embedding_meta_path(persist_dir)
 
     if vectorstore_path.exists() and _embedding_model_changed(meta_path):
-        print(
-            "Embedding model changed since last build "
-            f"(now {EMBEDDING_MODEL_NAME}/{EMBEDDING_DIMENSION}d); "
-            "forcing full vector store rebuild."
+        logger.warning(
+            "Embedding model changed since last build (now %s/%dd); "
+            "forcing full vector store rebuild.",
+            EMBEDDING_MODEL_NAME,
+            EMBEDDING_DIMENSION,
         )
         full_rebuild = True
 
@@ -229,7 +240,7 @@ def sync_vectorstore(
     vectorstore = load_vectorstore(persist_dir)
     if deleted_chunk_ids:
         vectorstore.delete(ids=deleted_chunk_ids)
-        print(f"Deleted {len(deleted_chunk_ids)} stale chunks from vector store")
+        logger.info("Deleted %d stale chunks from vector store", len(deleted_chunk_ids))
 
     changed = set(changed_sources)
     new_chunks = [
@@ -239,7 +250,7 @@ def sync_vectorstore(
     ]
     if new_chunks:
         _add_documents_in_batches(vectorstore, new_chunks, batch_size=batch_size)
-        print(f"Added {len(new_chunks)} changed chunks to vector store")
+        logger.info("Added %d changed chunks to vector store", len(new_chunks))
 
     _write_embedding_meta(meta_path)
     return vectorstore
@@ -248,7 +259,7 @@ def sync_vectorstore(
 def bm25_search(
     chunks: list[Document],
     query: str,
-    top_k: int = 5,
+    top_k: int = DEFAULT_RETRIEVE_TOP_K,
     collection: str | None = None,
 ) -> list[Document]:
     """One-off BM25 keyword retrieval. Prefer BM25Index for repeated queries."""
@@ -263,7 +274,7 @@ def _doc_key(doc: Document) -> tuple:
     return (
         str(doc.metadata.get("source", "")),
         doc.metadata.get("page", ""),
-        doc.page_content[:80],
+        doc.page_content[:CONTENT_FINGERPRINT_LENGTH],
     )
 
 
@@ -273,10 +284,10 @@ def _rrf_score(rank: int, weight: float, k: int = RRF_K) -> float:
 
 
 def hybrid_search_with_scores(
-    vectorstore,
+    vectorstore: Chroma,
     chunks: list[Document],
     query: str,
-    top_k: int = 5,
+    top_k: int = DEFAULT_RETRIEVE_TOP_K,
     bm25_index: BM25Index | None = None,
     collection: str | None = None,
     vector_weight: float = VECTOR_WEIGHT,
@@ -296,7 +307,7 @@ def hybrid_search_with_scores(
     BM25 relies on exact term overlap which a generated passage would dilute.
     """
     actual_vector_query = vector_query or query
-    search_kwargs = {"k": top_k}
+    search_kwargs: dict[str, object] = {"k": top_k}
     if collection:
         search_kwargs["filter"] = {"collection": collection}
 
@@ -305,9 +316,8 @@ def hybrid_search_with_scores(
             actual_vector_query, **search_kwargs
         )
     except Exception as exc:
-        print(f"Vector search failed, falling back to BM25 only: {exc}")
+        logger.warning("Vector search failed, falling back to BM25 only: %s", exc)
         raw_vector_hits = []
-    # Chroma returns (doc, distance) with smaller distance = more similar.
     vector_ranked = [doc for doc, _ in sorted(raw_vector_hits, key=lambda item: item[1])]
 
     bm25_ranked = (bm25_index or BM25Index(chunks)).search_with_scores(
@@ -330,18 +340,21 @@ def hybrid_search_with_scores(
 
     ordered = sorted(fusion.items(), key=lambda item: item[1], reverse=True)
     scope = f"collection={collection}" if collection else "all collections"
-    print(
-        f"Hybrid RRF search fused {len(vector_ranked)} vector + "
-        f"{len(bm25_ranked_docs)} BM25 hits into {len(ordered)} candidates ({scope})"
+    logger.info(
+        "Hybrid RRF search fused %d vector + %d BM25 hits into %d candidates (%s)",
+        len(vector_ranked),
+        len(bm25_ranked_docs),
+        len(ordered),
+        scope,
     )
-    return [(doc_by_key[key], score) for key, score in ordered[: top_k * 2]]
+    return [(doc_by_key[key], score) for key, score in ordered[: top_k * FUSION_CANDIDATE_MULTIPLIER]]
 
 
 def hybrid_search(
-    vectorstore,
+    vectorstore: Chroma,
     chunks: list[Document],
     query: str,
-    top_k: int = 5,
+    top_k: int = DEFAULT_RETRIEVE_TOP_K,
     bm25_index: BM25Index | None = None,
     collection: str | None = None,
 ) -> list[Document]:

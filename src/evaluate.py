@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,6 +18,11 @@ from src.metrics import (
 
 if TYPE_CHECKING:
     from langchain_core.documents import Document
+    from sentence_transformers import CrossEncoder
+    from openai import OpenAI
+    from src.retriever import BM25Index, Chroma
+
+logger = logging.getLogger(__name__)
 
 
 def load_eval_cases(path: str) -> list[EvalCase]:
@@ -62,10 +69,10 @@ def _run_config(
     config_name: str,
     cases: list[EvalCase],
     chunks: list["Document"],
-    vectorstore,
-    bm25_index,
-    reranker,
-    client,
+    vectorstore: "Chroma",
+    bm25_index: "BM25Index",
+    reranker: "CrossEncoder",
+    client: "OpenAI",
     model: str,
     retrieve_top_k: int,
     rerank_top_k: int,
@@ -84,10 +91,10 @@ def _run_config(
         docs: list[Document] = []
 
         if config_name == "vector_only":
-            search_kwargs = {"k": retrieve_top_k}
+            search_kwargs: dict[str, object] = {"k": retrieve_top_k}
             if case.collection:
                 search_kwargs["filter"] = {"collection": case.collection}
-            docs = [d for d, _ in vectorstore.similarity_search_with_score(case.question, **search_kwargs)]
+            docs = [doc for doc, _ in vectorstore.similarity_search_with_score(case.question, **search_kwargs)]
 
         elif config_name == "bm25_only":
             docs = bm25_index.search(case.question, top_k=retrieve_top_k, collection=case.collection)
@@ -97,15 +104,15 @@ def _run_config(
                 vectorstore, chunks, case.question,
                 top_k=retrieve_top_k, bm25_index=bm25_index, collection=case.collection,
             )
-            docs = [d for d, _ in candidates[:rerank_top_k]]
+            docs = [doc for doc, _ in candidates[:rerank_top_k]]
 
         elif config_name == "hybrid_rrf_rerank":
             candidates = hybrid_search_with_scores(
                 vectorstore, chunks, case.question,
                 top_k=retrieve_top_k, bm25_index=bm25_index, collection=case.collection,
             )
-            ranked = rerank_with_scores(reranker, case.question, [d for d, _ in candidates], top_k=rerank_top_k)
-            docs = [d for d, _ in ranked]
+            ranked = rerank_with_scores(reranker, case.question, [doc for doc, _ in candidates], top_k=rerank_top_k)
+            docs = [doc for doc, _ in ranked]
 
         elif config_name == "full_pipeline":
             hyde = generate_hypothetical_document(client, model, case.question)
@@ -114,8 +121,8 @@ def _run_config(
                 top_k=retrieve_top_k, bm25_index=bm25_index, collection=case.collection,
                 vector_query=hyde.document,
             )
-            ranked = rerank_with_scores(reranker, case.question, [d for d, _ in candidates], top_k=rerank_top_k)
-            docs = [d for d, _ in ranked]
+            ranked = rerank_with_scores(reranker, case.question, [doc for doc, _ in candidates], top_k=rerank_top_k)
+            docs = [doc for doc, _ in ranked]
         else:
             raise ValueError(f"Unknown config: {config_name}")
 
@@ -127,12 +134,12 @@ def _run_config(
             "grades": grades,
             "returned_sources": [
                 {
-                    "source": d.metadata.get("source"),
-                    "page": d.metadata.get("page"),
-                    "chunk_id": d.metadata.get("chunk_id"),
-                    "grade": chunk_relevance_grade(d.metadata, case),
+                    "source": doc.metadata.get("source"),
+                    "page": doc.metadata.get("page"),
+                    "chunk_id": doc.metadata.get("chunk_id"),
+                    "grade": chunk_relevance_grade(doc.metadata, case),
                 }
-                for d in docs
+                for doc in docs
             ],
         })
 
@@ -148,10 +155,10 @@ ABLATION_CONFIGS = ["vector_only", "bm25_only", "hybrid_rrf", "hybrid_rrf_rerank
 def run_ablation(
     cases: list[EvalCase],
     chunks: list["Document"],
-    vectorstore,
-    bm25_index,
-    reranker,
-    client,
+    vectorstore: "Chroma",
+    bm25_index: "BM25Index",
+    reranker: "CrossEncoder",
+    client: "OpenAI",
     model: str,
     retrieve_top_k: int = 5,
     rerank_top_k: int = 3,
@@ -163,17 +170,18 @@ def run_ablation(
     configs = configs or ABLATION_CONFIGS
     results = []
     for config in configs:
-        print(f"\n=== Running config: {config} ===")
+        logger.info("=== Running config: %s ===", config)
         result = _run_config(
             config, cases, chunks, vectorstore, bm25_index, reranker,
             client, model, retrieve_top_k, rerank_top_k, k_values,
         )
-        print(f"  {json.dumps(result['metrics'], ensure_ascii=False)}")
+        logger.info("  %s", json.dumps(result["metrics"], ensure_ascii=False))
         results.append(result)
     return results
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the evaluation tool."""
     parser = argparse.ArgumentParser(description="Evaluate RAG retrieval quality with IR metrics.")
     parser.add_argument("--eval-file", default="./examples/eval_questions.jsonl")
     parser.add_argument("--data-dir", default="./data")
@@ -192,23 +200,21 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
+    """Run the ablation evaluation from the command line."""
     from src.index_cache import load_or_update_chunks
     from src.retriever import BM25Index, sync_vectorstore
     from src.reranker import load_reranker
     from src.generator import load_generator
-    from main import load_local_env
 
     args = parse_args()
-    load_local_env()
 
-    import os
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         raise RuntimeError("Please set DEEPSEEK_API_KEY before running evaluate.")
 
     cases = load_eval_cases(args.eval_file)
-    print(f"Loaded {len(cases)} eval cases from {args.eval_file}")
+    logger.info("Loaded %d eval cases from %s", len(cases), args.eval_file)
 
     index_result = load_or_update_chunks(
         data_dir=args.data_dir,
@@ -243,28 +249,30 @@ def main():
         configs=args.configs,
     )
 
-    print("\n" + "=" * 70)
+    summary_separator = "=" * 70
+    print()
+    print(summary_separator)
     print("ABLATION SUMMARY")
-    print("=" * 70)
-    header_k = args.k_values
-    metric_names = []
-    for k in header_k:
+    print(summary_separator)
+    header_k_values = args.k_values
+    metric_names: list[str] = []
+    for k in header_k_values:
         metric_names += [f"R@{k}", f"P@{k}", f"N@{k}"]
     metric_names += ["MRR", "ms"]
     headers = ["Config"] + metric_names
-    col_widths = [max(len(h), 18) for h in headers]
-    print("  ".join(h.ljust(w) for h, w in zip(headers, col_widths)))
+    col_widths = [max(len(header), 18) for header in headers]
+    print("  ".join(header.ljust(width) for header, width in zip(headers, col_widths)))
     print("-" * (sum(col_widths) + 2 * (len(col_widths) - 1)))
     for result in results:
-        m = result["metrics"]
+        metrics = result["metrics"]
         row = [result["config"]]
-        for k in header_k:
-            row.append(f"{m.get(f'recall@{k}', 0):.3f}")
-            row.append(f"{m.get(f'precision@{k}', 0):.3f}")
-            row.append(f"{m.get(f'ndcg@{k}', 0):.3f}")
-        row.append(f"{m.get('mrr', 0):.3f}")
-        row.append(f"{m.get('elapsed_ms', 0):.0f}")
-        print("  ".join(str(v).ljust(w) for v, w in zip(row, col_widths)))
+        for k in header_k_values:
+            row.append(f"{metrics.get(f'recall@{k}', 0):.3f}")
+            row.append(f"{metrics.get(f'precision@{k}', 0):.3f}")
+            row.append(f"{metrics.get(f'ndcg@{k}', 0):.3f}")
+        row.append(f"{metrics.get('mrr', 0):.3f}")
+        row.append(f"{metrics.get('elapsed_ms', 0):.0f}")
+        print("  ".join(str(value).ljust(width) for value, width in zip(row, col_widths)))
 
     if args.output:
         report = {
@@ -273,7 +281,8 @@ def main():
             "rerank_top_k": args.rerank_top_k,
             "k_values": args.k_values,
             "results": results if not args.summary_only else [
-                {k: v for k, v in r.items() if k != "details"} for r in results
+                {key: value for key, value in result.items() if key != "details"}
+                for result in results
             ],
         }
         Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

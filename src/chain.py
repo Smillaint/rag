@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import logging
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from langchain_core.documents import Document
 
@@ -11,6 +13,7 @@ from src.query_rewrite import generate_hypothetical_document
 from src.reranker import load_reranker, rerank_with_scores
 from src.retriever import BM25Index, hybrid_search_with_scores, sync_vectorstore
 
+logger = logging.getLogger(__name__)
 
 CODE_QUERY_KEYWORDS = (
     "代码",
@@ -25,9 +28,18 @@ CODE_QUERY_KEYWORDS = (
     "program",
 )
 
+CODE_QUERY_RETRIEVE_TOP_K = 12
+CODE_QUERY_RERANK_TOP_K = 6
+NEIGHBOR_CHUNKS_BEFORE = 2
+NEIGHBOR_CHUNKS_AFTER = 3
+HYDE_DOC_PREVIEW_LENGTH = 200
+SOURCE_PREVIEW_LENGTH = 160
+
 
 @dataclass
 class RAGPipeline:
+    """End-to-end RAG pipeline orchestrating retrieval, reranking, and generation."""
+
     chunks: list[Document]
     vectorstore: object
     bm25_index: BM25Index
@@ -51,6 +63,7 @@ class RAGPipeline:
         log_dir: str = "./logs",
         vectorstore_batch_size: int = 128,
     ) -> "RAGPipeline":
+        """Build a pipeline from filesystem paths, loading or rebuilding indexes as needed."""
         index_result = load_or_update_chunks(
             data_dir=data_dir,
             chunk_size=chunk_size,
@@ -79,6 +92,7 @@ class RAGPipeline:
 
     @staticmethod
     def is_code_query(query: str) -> bool:
+        """Check if the query is likely about code and needs wider context."""
         normalized = query.lower()
         return any(keyword.lower() in normalized for keyword in CODE_QUERY_KEYWORDS)
 
@@ -93,8 +107,8 @@ class RAGPipeline:
     def expand_with_neighbor_chunks(
         self,
         docs: list[Document],
-        before: int = 2,
-        after: int = 3,
+        before: int = NEIGHBOR_CHUNKS_BEFORE,
+        after: int = NEIGHBOR_CHUNKS_AFTER,
     ) -> list[Document]:
         """Add adjacent chunks so split code blocks stay complete across pages."""
         chunk_by_index = {
@@ -129,7 +143,7 @@ class RAGPipeline:
                 seen.add(key)
                 expanded.append(neighbor)
 
-        print(f"Expanded code context to {len(expanded)} chunks")
+        logger.info("Expanded code context to %d chunks", len(expanded))
         return expanded
 
     def retrieve(
@@ -139,6 +153,7 @@ class RAGPipeline:
         rerank_top_k: int = 3,
         collection: str | None = None,
     ) -> list[Document]:
+        """Retrieve relevant chunks without returning trace diagnostics."""
         docs, _ = self.retrieve_with_trace(query, retrieve_top_k, rerank_top_k, collection)
         return docs
 
@@ -148,17 +163,19 @@ class RAGPipeline:
         retrieve_top_k: int = 5,
         rerank_top_k: int = 3,
         collection: str | None = None,
-    ) -> tuple[list[Document], dict]:
+    ) -> tuple[list[Document], dict[str, Any]]:
+        """Retrieve, rerank, and expand chunks, returning full trace diagnostics."""
         started_at = time.perf_counter()
         code_query = self.is_code_query(query)
         requested_retrieve_top_k = retrieve_top_k
         requested_rerank_top_k = rerank_top_k
         if code_query:
-            retrieve_top_k = max(retrieve_top_k, 12)
-            rerank_top_k = max(rerank_top_k, 6)
-            print(
-                "Code query detected; "
-                f"using retrieve_top_k={retrieve_top_k}, rerank_top_k={rerank_top_k}"
+            retrieve_top_k = max(retrieve_top_k, CODE_QUERY_RETRIEVE_TOP_K)
+            rerank_top_k = max(rerank_top_k, CODE_QUERY_RERANK_TOP_K)
+            logger.info(
+                "Code query detected; using retrieve_top_k=%d, rerank_top_k=%d",
+                retrieve_top_k,
+                rerank_top_k,
             )
 
         hyde_started_at = time.perf_counter()
@@ -190,13 +207,13 @@ class RAGPipeline:
             expanded_docs = self.expand_with_neighbor_chunks(docs)
             expansion_ms = (time.perf_counter() - expansion_started_at) * 1000
 
-        trace = {
+        trace: dict[str, Any] = {
             "collection": collection,
             "code_query": code_query,
             "hyde": {
                 "used": hyde_result.used,
                 "error": hyde_result.error,
-                "doc_preview": (hyde_result.document or "")[:200],
+                "doc_preview": (hyde_result.document or "")[:HYDE_DOC_PREVIEW_LENGTH],
             },
             "requested_retrieve_top_k": requested_retrieve_top_k,
             "requested_rerank_top_k": requested_rerank_top_k,
@@ -244,6 +261,7 @@ class RAGPipeline:
         rerank_top_k: int = 3,
         collection: str | None = None,
     ) -> str:
+        """Answer a question, returning only the answer string."""
         return self.ask_with_sources(
             query,
             retrieve_top_k=retrieve_top_k,
@@ -257,7 +275,8 @@ class RAGPipeline:
         retrieve_top_k: int = 5,
         rerank_top_k: int = 3,
         collection: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
+        """Answer a question and return the answer, citations, sources, and trace."""
         total_started_at = time.perf_counter()
         docs, trace = self.retrieve_with_trace(
             query,
@@ -285,7 +304,7 @@ class RAGPipeline:
                 "chunk_in_page": doc.metadata.get("chunk_in_page"),
                 "char_start": doc.metadata.get("char_start"),
                 "char_end": doc.metadata.get("char_end"),
-                "preview": doc.page_content[:160],
+                "preview": doc.page_content[:SOURCE_PREVIEW_LENGTH],
             }
             for doc in docs
         ]
