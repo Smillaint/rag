@@ -1,49 +1,75 @@
 # 本地 PDF RAG 智能问答系统
 
-这是一个面向本地 PDF 文档的 RAG（Retrieval-Augmented Generation，检索增强生成）问答项目。项目支持 PDF 解析、可追溯 chunk 分片、向量检索、BM25 关键词检索、CrossEncoder 精排，以及通过 DeepSeek/OpenAI 兼容接口生成带引用的回答。
+面向本地 PDF 文档的 RAG（Retrieval-Augmented Generation，检索增强生成）问答系统。支持 collection 隔离、RRF 混合检索、HyDE 查询改写、CrossEncoder 精排、IR 评测框架，以及通过 DeepSeek/OpenAI 兼容接口生成带引用的回答。
 
 ## 功能特性
 
-- 按页读取本地 PDF，并保留 `source`、`page`、`chunk_id` 等元数据。
-- 基于段落、换行、中文标点和重叠窗口进行递归分片。
-- 为每个 chunk 记录 `chunk_index`、`chunk_in_page`、`char_start`、`char_end`、`chunk_length`，便于调试、溯源和后续评测。
-- 将 chunk 结果缓存到 `.rag_cache/`，服务启动时优先复用缓存，避免重复解析 PDF。
-- 根据 PDF 文件大小和修改时间做增量索引，新增/修改/删除文档时只同步受影响 chunk。
-- 使用 Chroma 构建可持久化的本地向量库。
-- 融合向量检索和 BM25 关键词检索，提高中文/中英混合文档的召回稳定性。
-- 使用 CrossEncoder Reranker 对候选片段进行精排，提高最终上下文相关性。
+- 按 collection（子目录）隔离语料，检索时可限定领域，避免跨域误召回。
+- 按 PyMuPDF 页面抽取文本，保留 `source`、`source_path`、`collection`、`page`、`chunk_id`、`char_start`、`char_end` 等可追溯元数据。
+- 基于段落、换行、中文标点和重叠窗口进行递归分片，为每个 chunk 记录 `chunk_index`、`chunk_in_page`、`content_hash`、`chunk_length`。
+- chunk 缓存到 `.rag_cache/`，通过 sha256 + mtime 文件指纹做增量索引，新增/修改/删除文档时只同步受影响 chunk。
+- 使用 **bge-m3**（1024 维，多语言）构建 Chroma 向量库，embedding 指纹自动检测模型变更并重建。
+- **加权 RRF 混合检索**：向量检索 + BM25 关键词检索通过 Reciprocal Rank Fusion 融合，无需分数归一化，重叠命中的文档自动提权。
+- **HyDE 查询改写**：检索前用 LLM 生成假想答案文档，用于向量检索缩小问题-答案语义鸿沟；BM25 和 reranker 仍使用原始 query，失败自动降级。
+- 使用 **bge-reranker-v2-m3**（多语言 CrossEncoder）对候选片段精排，辅以词面匹配加权修正中文技术词排序。
 - 针对代码解释类问题自动扩大检索窗口，并引入相邻 chunk，避免代码块被分片切断。
-- 通过提示词约束模型只基于检索片段回答，并输出 chunk 引用，降低幻觉风险。
-- 提供轻量级检索评测脚本，可用 JSONL 配置问题、期望来源和关键词。
-- 问答接口返回 trace 信息，记录召回数量、精排数量、代码查询触发情况、各阶段耗时和 rerank 分数，便于定位检索质量和性能瓶颈。
+- 通过提示词约束模型只基于检索片段回答，并输出 chunk 引用，降低幻觉风险；API 不可用时自动降级为本地抽取式回答。
+- **IR 评测框架**：Recall@K、Precision@K、MRR、NDCG@K（多级相关性），支持五配置消融对比（vector-only / BM25-only / hybrid-RRF / +rerank / full+HyDE）。
+- 问答接口返回完整 trace：HyDE 状态、RRF 融合分数、rerank 分数、各阶段耗时，按日期写入 JSONL 调用链日志。
+
+## 技术栈
+
+| 环节 | 技术选型 | 说明 |
+|---|---|---|
+| PDF 解析 | PyMuPDF (fitz) | 按页抽取文本，保留页码元数据 |
+| 文本分片 | LangChain `RecursiveCharacterTextSplitter` | 中文标点感知，chunk_size=900，overlap=120 |
+| 增量索引 | sha256 + mtime 文件指纹 | `.rag_cache/` JSONL 缓存，只重建变化的文件 |
+| Embedding | BAAI/bge-m3 | 1024 维，多语言，L2 归一化 |
+| 向量库 | Chroma（LangChain Community） | 本地持久化，分批写入，embedding 指纹自动重建 |
+| 关键词检索 | rank_bm25 (BM25Okapi) + jieba 分词 | 按 collection 懒加载索引 |
+| 混合融合 | 加权 Reciprocal Rank Fusion (RRF) | rank-based，无需分数归一化，k=60 |
+| 查询改写 | HyDE (Hypothetical Document Embeddings) | LLM 生成假想文档用于向量检索 |
+| 精排 | BAAI/bge-reranker-v2-m3 | 多语言 CrossEncoder + 词面匹配加权 |
+| 生成 | DeepSeek (OpenAI 兼容接口) | deepseek-chat，temperature=0.3，有抽取式降级 |
+| 评测 | 纯标准库 IR 指标 | Recall@K / Precision@K / MRR / NDCG@K，五配置消融 |
+| 服务 | FastAPI + Uvicorn | 前端控制台、问答 API、统计、代码浏览 |
+| 日志 | Python logging + JSONL 调用链 | `logs/YYYY-MM-DD.jsonl`，含 trace 和 timing |
 
 ## 系统架构
 
 ```text
-PDF 文件
-  -> PyMuPDF 按页抽取文本
-  -> 带页码/字符偏移元数据的递归 chunk 分片
-  -> Chroma 向量索引 + BM25 关键词索引
-  -> 混合召回候选片段
-  -> CrossEncoder 精排
-  -> 代码类问题的相邻 chunk 上下文扩展
-  -> OpenAI 兼容大模型生成答案
+用户 query
+  -> 代码查询检测（扩 top_k）
+  -> HyDE 生成假想文档
+  -> 向量检索(假想文档) + BM25(原query) -> RRF 融合
+  -> bge-reranker 精排(原query)
+  -> 代码查询邻居扩展
+  -> DeepSeek 生成答案
+  -> JSONL 调用链日志
 ```
 
 ## 目录结构
 
 ```text
 src/
-  loader.py       PDF 读取、chunk 分片、分片统计
-  retriever.py    Chroma 向量检索、BM25、混合召回
-  reranker.py     CrossEncoder 精排
-  generator.py    OpenAI 兼容接口答案生成
-  chain.py        端到端 RAGPipeline 编排
-  evaluate.py     检索评测命令行工具
-main.py           命令行入口
-server.py         FastAPI 服务入口
-examples/         示例评测问题
-docs/             架构设计、评测方案与开发记录
+  loader.py          PDF 读取、chunk 分片、元数据分配
+  retriever.py       bge-m3 embedding、Chroma 向量库、BM25、RRF 混合检索
+  reranker.py        bge-reranker-v2-m3 精排、词面匹配加权
+  query_rewrite.py   HyDE 假想文档生成
+  generator.py       OpenAI 兼容接口答案生成、抽取式降级
+  chain.py           端到端 RAGPipeline 编排
+  index_cache.py     sha256 文件指纹、增量索引、chunk 缓存
+  query_log.py       JSONL 调用链日志
+  corpus_stats.py    语料统计（页数、chunk 分布、模型信息）
+  metrics.py         IR 评测指标（Recall@K / MRR / NDCG@K / Precision@K）
+  evaluate.py        消融评测命令行工具
+main.py              CLI 入口
+server.py            FastAPI 服务入口
+frontend/            前端控制台（HTML/CSS/JS）
+scripts/             模型下载、向量库重建、smoke 测试
+examples/            评测问题（JSONL）
+tests/               pytest 测试套件
+docs/                架构设计、开发记录、面试深挖稿
 ```
 
 ## 环境安装
@@ -54,16 +80,45 @@ docs/             架构设计、评测方案与开发记录
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
-把需要问答的 PDF 放到本地 `data/` 目录：
+把需要问答的 PDF 按子目录放到 `data/` 目录，子目录名即为 collection 名：
 
 ```text
 data/
-  your-document.pdf
+  algorithm/
+    第1章-基础.pdf
+    第3章-图论基础.pdf
+  netsec_lab/
+    实验1 TCP协议漏洞利用指导手册.pdf
+  tcpip/
+    TCPIP详解 卷1：协议.pdf
 ```
 
-`data/`、`vectorstore/` 和 `.rag_cache/` 已加入 `.gitignore`，不会上传到 GitHub。
+`data/`、`vectorstore/`、`.rag_cache/`、`logs/` 已加入 `.gitignore`，不会上传到 GitHub。
+
+## 模型下载
+
+项目使用两个 Hugging Face 模型，首次运行需下载（约 4.4GB）：
+
+| 模型 | 用途 | 大小 |
+|---|---|---|
+| BAAI/bge-m3 | Embedding（1024 维） | ~2.2GB |
+| BAAI/bge-reranker-v2-m3 | CrossEncoder 精排 | ~2.2GB |
+
+默认使用 `https://hf-mirror.com` 镜像。如果 `huggingface_hub` 下载失败，可使用脚本手动下载：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\download_models.py
+```
+
+下载完成后设置离线模式避免重复请求：
+
+```powershell
+$env:HF_HUB_OFFLINE = "1"
+$env:TRANSFORMERS_OFFLINE = "1"
+```
 
 ## API Key 配置
 
@@ -74,17 +129,13 @@ base_url = https://api.deepseek.com
 model    = deepseek-chat
 ```
 
-推荐在本地 `.env` 文件中配置密钥：
+在本地 `.env` 文件中配置密钥：
 
 ```text
 DEEPSEEK_API_KEY="your_api_key_here"
 ```
 
-`.env` 已被 `.gitignore` 忽略，不会提交到仓库。也可以在 PowerShell 中临时设置：
-
-```powershell
-$env:DEEPSEEK_API_KEY="your_api_key_here"
-```
+`.env` 已被 `.gitignore` 忽略，不会提交到仓库。也支持其他 OpenAI 兼容接口（Qwen、GLM 等），修改 `base_url` 和 `model` 即可。
 
 ## 本地运行
 
@@ -97,7 +148,7 @@ $env:DEEPSEEK_API_KEY="your_api_key_here"
 日常问答直接复用已有向量库：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py "密码实训平台如何开始实验？"
+.\.venv\Scripts\python.exe main.py "Dijkstra算法适合解决什么问题？" --collection algorithm
 ```
 
 进入交互模式：
@@ -106,10 +157,16 @@ $env:DEEPSEEK_API_KEY="your_api_key_here"
 .\.venv\Scripts\python.exe main.py
 ```
 
+列出可用 collection：
+
+```powershell
+.\.venv\Scripts\python.exe main.py --list-collections
+```
+
 调整检索和分片参数：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py --retrieve-top-k 8 --rerank-top-k 5 --chunk-size 512 --chunk-overlap 64 "你的问题"
+.\.venv\Scripts\python.exe main.py --retrieve-top-k 8 --rerank-top-k 5 --chunk-size 768 --chunk-overlap 96 "你的问题"
 ```
 
 修改 chunk 参数后需要重建向量库：
@@ -118,7 +175,7 @@ $env:DEEPSEEK_API_KEY="your_api_key_here"
 .\.venv\Scripts\python.exe main.py --rebuild --chunk-size 768 --chunk-overlap 96 "你的问题"
 ```
 
-默认 chunk 缓存目录是 `.rag_cache/`。如果 PDF 没有变化，启动时会直接加载缓存；如果新增、修改或删除 PDF，只会重新解析变化的文件，并同步更新向量库。
+如果切换了 embedding 模型，向量库会通过 `.embedding_meta.json` 指纹自动检测并重建，无需手动加 `--rebuild`。
 
 ## FastAPI 服务化
 
@@ -128,7 +185,7 @@ $env:DEEPSEEK_API_KEY="your_api_key_here"
 .\.venv\Scripts\python.exe -m uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
-服务启动时会加载一次 `RAGPipeline`，后续请求复用内存中的 PDF 分片、BM25 索引、向量库和 Reranker，避免每个问题都重复初始化。
+服务启动时会加载一次 `RAGPipeline`，后续请求复用内存中的 PDF 分片、BM25 索引、向量库和 Reranker。
 
 健康检查：
 
@@ -142,57 +199,108 @@ curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/stats
 ```
 
+查看 collection 列表：
+
+```powershell
+curl http://127.0.0.1:8000/collections
+```
+
 调用问答接口：
 
 ```powershell
 curl -X POST http://127.0.0.1:8000/ask `
   -H "Content-Type: application/json" `
-  -d "{\"query\":\"Dijkstra算法适合解决什么问题？\"}"
+  -d "{\"query\":\"Dijkstra算法适合解决什么问题？\",\"collection\":\"algorithm\"}"
 ```
 
-接口会返回 `answer`、`sources` 和 `trace`。其中 `sources` 包含文件名、页码、chunk 编号和片段预览，`trace` 包含召回数量、精排分数、代码查询触发情况和各阶段耗时，便于定位答案来源与性能瓶颈。
+接口返回 `answer`、`citations`、`sources` 和 `trace`：
+
+- `citations`：答案引用的 chunk 编号、来源、页码。
+- `sources`：检索片段的完整元数据（source、page、chunk_id、char_start、char_end、preview）。
+- `trace`：HyDE 状态、RRF 融合分数、rerank 分数、各阶段耗时（hyde / retrieval / rerank / generation / total）。
+
+查看项目进度和代码浏览：
+
+```powershell
+curl http://127.0.0.1:8000/project/progress
+curl http://127.0.0.1:8000/project/code-files
+curl http://127.0.0.1:8000/project/code/chain
+```
+
+也可直接在浏览器打开 `http://127.0.0.1:8000` 查看前端控制台。
 
 ## 代码问答增强
 
 当问题中包含 `代码`、`程序`、`函数`、`main.c`、`demo`、`编程`、`解释` 等关键词时，系统会自动进入代码问答模式：
 
-- 自动提高召回数量和精排数量。
-- 基于 `chunk_index` 引入命中片段前后的相邻 chunk。
+- 自动提高召回数量（top_k=12）和精排数量（top_k=6）。
+- 基于 `chunk_index` 引入命中片段前后的相邻 chunk（前 2 后 3）。
 - 支持代码跨页时的上下文拼接。
 - 生成阶段会重点解释代码目的、主要变量、函数调用、执行流程和资源释放。
 
 示例：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py "解释一下sm4实验给的代码"
+.\.venv\Scripts\python.exe main.py "解释一下sm4实验给的代码" --collection netsec_lab
 ```
 
 ## 检索评测
 
-在 `examples/eval_questions.jsonl` 中配置评测问题：
+在 `examples/eval_questions.jsonl` 中配置评测问题，支持 source 和 page 级相关性标注：
 
 ```jsonl
-{"question":"文档的核心主题是什么？","expected_sources":["paper.pdf"],"expected_keywords":["retrieval"]}
+{"question":"Dijkstra算法适合解决什么问题？","collection":"algorithm","relevant_sources":["第3章-图论基础.pdf","第7章-图论提高.pdf"],"relevant_source_pages":[{"source":"第3章-图论基础.pdf","pages":[]}],"any_keywords":["Dijkstra","最短路径"]}
 ```
 
-不使用 reranker 的快速评测：
+运行五配置消融评测：
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.evaluate --eval-file ./examples/eval_questions.jsonl --skip-rerank
+.\.venv\Scripts\python.exe -m src.evaluate --eval-file ./examples/eval_questions.jsonl --output ./eval_report.json
 ```
 
-使用完整精排的评测：
+只运行部分配置：
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.evaluate --eval-file ./examples/eval_questions.jsonl
+.\.venv\Scripts\python.exe -m src.evaluate --eval-file ./examples/eval_questions.jsonl --configs vector_only hybrid_rrf
 ```
 
-评测报告包含 `pass_rate`、`source_hit`、`keyword_hit` 和返回片段的来源元数据。
+评测输出消融对比表：
+
+```text
+Config              R@3      P@3      N@3      R@5      P@5      N@5      MRR      ms
+--------------------------------------------------------------------------------------------
+vector_only         0.610    0.833    0.872    1.000    0.829    0.945    0.929    1525
+bm25_only           0.539    0.571    0.653    0.929    0.557    0.783    0.779    6112
+hybrid_rrf          1.000    0.786    0.947    1.000    0.471    0.947    0.952    1173
+hybrid_rrf_rerank   1.000    0.833    0.967    1.000    0.500    0.967    0.964    84919
+full_pipeline       1.000    0.857    0.972    1.000    0.514    0.972    0.964    139388
+```
+
+## 测试
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/ -q
+```
+
+测试覆盖：
+
+| 文件 | 覆盖内容 |
+|---|---|
+| test_loader_metadata.py | 分片元数据完整性（chunk_id、char_start/end、content_hash） |
+| test_generator_fallback.py | 抽取式降级回答生成 |
+| test_chain_context_expansion.py | 代码查询邻居扩展不跨 source 边界 |
+| test_hybrid_rrf.py | RRF 公式、去重、重叠提权、向量降级、embedding 指纹 |
+| test_hyde.py | HyDE 生成、异常降级、空响应降级、vector_query 路由 |
+| test_metrics.py | Recall@K、Precision@K、MRR、NDCG@K、多级相关性、聚合 |
 
 ## 注意事项
 
-- 首次加载 embedding/reranker 模型可能需要联网。
-- 默认 Hugging Face endpoint 设置为 `https://hf-mirror.com`，便于国内环境下载模型。
+- 首次加载 bge-m3 / bge-reranker-v2-m3 需要下载约 4.4GB 模型。
+- 默认 Hugging Face endpoint 设置为 `https://hf-mirror.com`，便于国内环境下载。
+- 模型下载完成后建议设置 `HF_HUB_OFFLINE=1` 和 `TRANSFORMERS_OFFLINE=1`，避免每次启动向 huggingface.co 发 HEAD 请求。
+- 切换 embedding 模型后，向量库会通过 `.embedding_meta.json` 指纹自动检测并重建，无需手动 `--rebuild`。
 - 不要提交 API key、本地 PDF、生成的向量库或 `.venv`。
 - `.rag_cache/` 是本地生成的 chunk 缓存，也不需要提交。
 - 日常问答不要加 `--rebuild`，否则会重新计算所有 chunk 的 embedding，耗时较长。
+- bge-m3 在 CPU 上 embed 3546 个 chunk 约需 50 分钟，建议首次重建时耐心等待或使用 GPU。
+- bge-reranker-v2-m3 在 CPU 上单次精排约 6s，对延迟敏感的场景可考虑 ONNX 量化或缓存热门 query。
