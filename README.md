@@ -1,6 +1,6 @@
 # 本地 PDF RAG 智能问答系统
 
-面向本地 PDF 文档的 RAG（Retrieval-Augmented Generation，检索增强生成）问答系统。支持 collection 隔离、RRF 混合检索、HyDE 查询改写、CrossEncoder 精排、IR 评测框架，以及通过 DeepSeek/OpenAI 兼容接口生成带引用的回答。
+面向本地 PDF 文档的 RAG（Retrieval-Augmented Generation，检索增强生成）问答系统。通过 collection 隔离、RRF 混合检索、HyDE 查询改写、CrossEncoder 精排和 IR 评测框架，为 LLM Agent 提供高质量、可追溯、可评测的知识检索能力。
 
 ## 功能特性
 
@@ -19,21 +19,49 @@
 
 ## 技术栈
 
-| 环节 | 技术选型 | 说明 |
+### 检索引擎
+
+| 环节 | 技术选型 | 设计要点 |
 |---|---|---|
-| PDF 解析 | PyMuPDF (fitz) | 按页抽取文本，保留页码元数据 |
-| 文本分片 | LangChain `RecursiveCharacterTextSplitter` | 中文标点感知，chunk_size=900，overlap=120 |
-| 增量索引 | sha256 + mtime 文件指纹 | `.rag_cache/` JSONL 缓存，只重建变化的文件 |
-| Embedding | BAAI/bge-m3 | 1024 维，多语言，L2 归一化 |
-| 向量库 | Chroma（LangChain Community） | 本地持久化，分批写入，embedding 指纹自动重建 |
-| 关键词检索 | rank_bm25 (BM25Okapi) + jieba 分词 | 按 collection 懒加载索引 |
-| 混合融合 | 加权 Reciprocal Rank Fusion (RRF) | rank-based，无需分数归一化，k=60 |
-| 查询改写 | HyDE (Hypothetical Document Embeddings) | LLM 生成假想文档用于向量检索 |
-| 精排 | BAAI/bge-reranker-v2-m3 | 多语言 CrossEncoder + 词面匹配加权 |
-| 生成 | DeepSeek (OpenAI 兼容接口) | deepseek-chat，temperature=0.3，有抽取式降级 |
-| 评测 | 纯标准库 IR 指标 | Recall@K / Precision@K / MRR / NDCG@K，五配置消融 |
-| 服务 | FastAPI + Uvicorn | 前端控制台、问答 API、统计、代码浏览 |
-| 日志 | Python logging + JSONL 调用链 | `logs/YYYY-MM-DD.jsonl`，含 trace 和 timing |
+| Embedding | BAAI/bge-m3（1024 维） | 多语言支持，L2 归一化，中文语义优于 MiniLM 系列；embedding 指纹（`.embedding_meta.json`）自动检测模型变更并重建向量库，避免维度不匹配 |
+| 向量库 | Chroma | 本地持久化，分批写入（batch_size=128），按 collection 元数据过滤检索域 |
+| 关键词检索 | rank_bm25 + jieba | 按 collection 懒加载 BM25 索引，首次查询时构建并缓存，避免全量预建内存压力 |
+| 混合融合 | 加权 Reciprocal Rank Fusion (RRF) | rank-based 融合，无需向量距离与 BM25 分数的归一化；重叠命中文档累加分数自动提权；向量检索失败自动降级为纯 BM25 |
+| 精排 | BAAI/bge-reranker-v2-m3 | 多语言 CrossEncoder 成对打分；辅以词面匹配加权（coverage × 0.15）修正中文技术术语排序；仅对 top candidates 精排控制延迟 |
+
+### 查询理解与生成
+
+| 环节 | 技术选型 | 设计要点 |
+|---|---|---|
+| 查询改写 | HyDE (Hypothetical Document Embeddings) | 检索前用 LLM 生成假想答案文档，用于向量检索缩小问题-答案语义鸿沟；BM25 和 reranker 仍使用原始 query 保留精确词匹配；LLM 调用失败自动降级到原 query |
+| 代码查询检测 | 关键词触发 + 动态 top_k | 检测到代码类问题时自动扩大召回（top_k=12）和精排（top_k=6），并引入命中片段前后的相邻 chunk（前 2 后 3），避免代码块被分片切断 |
+| 答案生成 | DeepSeek（OpenAI 兼容接口） | 提示词约束模型只基于检索片段回答并输出 chunk 引用；API 不可用时降级为本地抽取式回答（基于 query term overlap 的 passage 排序） |
+
+### 数据管线
+
+| 环节 | 技术选型 | 设计要点 |
+|---|---|---|
+| PDF 解析 | PyMuPDF (fitz) | 按页抽取文本，保留页码和字符偏移元数据 |
+| 文本分片 | LangChain `RecursiveCharacterTextSplitter` | 中文标点感知（。？！；，），chunk_size=900，overlap=120 |
+| 增量索引 | sha256 + mtime 文件指纹 | 只比较稳定字段（name/source_path/collection/size/mtime_ns/sha256），不比较运行时 path 字符串；新增/修改/删除文档时只同步受影响 chunk |
+| Collection 隔离 | 子目录即 collection | `data/algorithm/`、`data/tcpip/` 等自然分区，检索时可限定领域避免跨域误召回 |
+
+### 评测与可观测性
+
+| 环节 | 技术选型 | 设计要点 |
+|---|---|---|
+| IR 指标 | 纯标准库实现 | Recall@K / Precision@K / MRR / NDCG@K，多级相关性（source 匹配=1，source+page 匹配=2）；零额外依赖 |
+| 消融框架 | 五配置对比 | vector-only / BM25-only / hybrid-RRF / +rerank / full+HyDE，输出对比表格和 JSON 报告 |
+| 调用链日志 | JSONL 按日期轮转 | `logs/YYYY-MM-DD.jsonl`，记录 query、collection、top-k、answer 预览、citations、完整 trace |
+| Trace 诊断 | 结构化 trace dict | HyDE 状态、RRF 融合分数、rerank 分数、各阶段耗时（hyde / retrieval / rerank / generation / total），便于定位检索质量和性能瓶颈 |
+
+### 服务与部署
+
+| 环节 | 技术选型 | 设计要点 |
+|---|---|---|
+| API 服务 | FastAPI + Uvicorn | lifespan 管理单例 pipeline，请求复用内存中的 chunk、BM25 索引、向量库和 reranker |
+| 前端控制台 | 原生 HTML/CSS/JS | 项目进度、collection 列表、源码浏览、运行状态 |
+| 模型管理 | HF mirror + 离线模式 | `hf-mirror.com` 镜像下载，`HF_HUB_OFFLINE=1` 跳过启动时 HEAD 请求；断点续传下载脚本 |
 
 ## 系统架构
 
@@ -69,7 +97,7 @@ frontend/            前端控制台（HTML/CSS/JS）
 scripts/             模型下载、向量库重建、smoke 测试
 examples/            评测问题（JSONL）
 tests/               pytest 测试套件
-docs/                架构设计、开发记录、面试深挖稿
+docs/                架构设计、开发记录
 ```
 
 ## 环境安装
