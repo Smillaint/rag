@@ -17,4 +17,9 @@ data/
 vectorstore/
 .rag_cache/
 logs/
+eval_report.json
+rebuild_*.log
+
+# Local development notes (not for remote)
+WORK_NOTES.md
 
