@@ -7,8 +7,9 @@ from langchain_core.documents import Document
 from src.generator import generate_answer_result, load_generator
 from src.index_cache import load_or_update_chunks
 from src.query_log import write_query_log
+from src.query_rewrite import generate_hypothetical_document
 from src.reranker import load_reranker, rerank_with_scores
-from src.retriever import BM25Index, hybrid_search, sync_vectorstore
+from src.retriever import BM25Index, hybrid_search_with_scores, sync_vectorstore
 
 
 CODE_QUERY_KEYWORDS = (
@@ -160,15 +161,21 @@ class RAGPipeline:
                 f"using retrieve_top_k={retrieve_top_k}, rerank_top_k={rerank_top_k}"
             )
 
+        hyde_started_at = time.perf_counter()
+        hyde_result = generate_hypothetical_document(self.client, self.model, query)
+        hyde_ms = (time.perf_counter() - hyde_started_at) * 1000
+
         retrieval_started_at = time.perf_counter()
-        candidates = hybrid_search(
+        fusion_candidates = hybrid_search_with_scores(
             self.vectorstore,
             self.chunks,
             query,
             top_k=retrieve_top_k,
             bm25_index=self.bm25_index,
             collection=collection,
+            vector_query=hyde_result.document,
         )
+        candidates = [doc for doc, _ in fusion_candidates]
         retrieval_ms = (time.perf_counter() - retrieval_started_at) * 1000
 
         rerank_started_at = time.perf_counter()
@@ -186,6 +193,11 @@ class RAGPipeline:
         trace = {
             "collection": collection,
             "code_query": code_query,
+            "hyde": {
+                "used": hyde_result.used,
+                "error": hyde_result.error,
+                "doc_preview": (hyde_result.document or "")[:200],
+            },
             "requested_retrieve_top_k": requested_retrieve_top_k,
             "requested_rerank_top_k": requested_rerank_top_k,
             "effective_retrieve_top_k": retrieve_top_k,
@@ -193,7 +205,19 @@ class RAGPipeline:
             "candidate_count": len(candidates),
             "reranked_count": len(docs),
             "final_context_count": len(expanded_docs),
+            "fusion_scores": [
+                {
+                    "chunk_id": doc.metadata.get("chunk_id"),
+                    "source": doc.metadata.get("source"),
+                    "source_path": doc.metadata.get("source_path"),
+                    "collection": doc.metadata.get("collection"),
+                    "page": doc.metadata.get("page"),
+                    "rrf_score": round(score, 5),
+                }
+                for doc, score in fusion_candidates
+            ],
             "timing_ms": {
+                "hyde": round(hyde_ms, 2),
                 "retrieval": round(retrieval_ms, 2),
                 "rerank": round(rerank_ms, 2),
                 "context_expansion": round(expansion_ms, 2),
