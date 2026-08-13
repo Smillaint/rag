@@ -9,8 +9,8 @@ from sentence_transformers import CrossEncoder
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 
-def load_reranker(model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
-    """Load the CrossEncoder reranker model."""
+def load_reranker(model_name: str = "BAAI/bge-reranker-v2-m3"):
+    """Load the multilingual CrossEncoder reranker model."""
     try:
         model = CrossEncoder(model_name, max_length=512)
     except Exception as exc:
@@ -40,6 +40,12 @@ def _query_terms(query: str) -> set[str]:
 
 
 def _lexical_bonus(query: str, text: str) -> float:
+    """Gentle lexical tiebreaker on top of the multilingual reranker.
+
+    bge-reranker-v2-m3 already handles Chinese semantics well, so this only
+    adds a small coverage-weighted bonus for exact technical-term matches
+    (e.g. acronyms like SM4/AES) to break near-ties.
+    """
     terms = _query_terms(query)
     if not terms:
         return 0.0
@@ -50,8 +56,7 @@ def _lexical_bonus(query: str, text: str) -> float:
         return 0.0
 
     coverage = len(matched) / len(terms)
-    exact_bonus = 0.35 * len(matched)
-    return coverage + exact_bonus
+    return 0.15 * coverage
 
 
 def rerank_with_scores(model, query: str, docs: list, top_k: int = 3) -> list[tuple]:
