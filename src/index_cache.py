@@ -10,6 +10,14 @@ from src.loader import assign_chunk_metadata, load_pdf_file, split_documents
 
 
 CACHE_VERSION = 3
+FILE_FINGERPRINT_FIELDS = (
+    "name",
+    "source_path",
+    "collection",
+    "size",
+    "mtime_ns",
+    "sha256",
+)
 
 
 @dataclass
@@ -52,6 +60,10 @@ def _file_sha256(path: Path) -> str:
         for block in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _same_file_fingerprint(current: dict, cached: dict) -> bool:
+    return all(current.get(field) == cached.get(field) for field in FILE_FINGERPRINT_FIELDS)
 
 
 def _document_to_record(doc: Document) -> dict:
@@ -160,7 +172,7 @@ def load_or_update_chunks(
     changed_sources = sorted(
         source
         for source in current_sources
-        if source not in cached_files or current_files[source] != cached_files[source]
+        if source not in cached_files or not _same_file_fingerprint(current_files[source], cached_files[source])
     )
 
     affected_sources = set(deleted_sources + changed_sources)

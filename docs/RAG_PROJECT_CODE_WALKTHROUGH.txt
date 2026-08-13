@@ -52,7 +52,7 @@ chunk_id 不是绝对永久 ID。如果 PDF 文本抽取结果或分片参数变
 - src/retriever.py: sync_vectorstore()
 
 真实逻辑：
-启动时递归扫描 data/ 下的 PDF，记录 source_path、collection、文件大小、mtime_ns 和 sha256；然后和 .rag_cache/manifest.json 里的文件清单比较。
+启动时递归扫描 data/ 下的 PDF，记录 source_path、collection、文件大小、mtime_ns 和 sha256；然后和 .rag_cache/manifest.json 里的文件清单比较。变更判断只比较 name、source_path、collection、size、mtime_ns、sha256 等稳定字段，不比较运行时 path 字符串，避免 `./data` 和绝对路径写法不同导致误判全量变化。
 
 如果缓存不存在、缓存版本不兼容、分片参数变化或用户传 --rebuild：
 - 重新解析所有 PDF。
@@ -70,7 +70,7 @@ chunk_id 不是绝对永久 ID。如果 PDF 文本抽取结果或分片参数变
 我做的是文件级增量，不是 chunk 级 diff。文件未变化时直接复用 chunk 缓存；文件变化时重新解析该文件，删除旧 chunks 并写入新 chunks。这样实现简单，正确性更容易保证。PDF 文本抽取和分片边界容易受前文影响，所以当前项目没有强行做 chunk 级 diff。
 
 追问为什么加 sha256：
-早期只靠 size 和 mtime_ns，速度快，但极端情况下不够强。现在 manifest 里也记录 sha256，能更可靠地识别文件内容变化。代价是启动扫描时需要读一遍 PDF 文件；对于本地知识库规模可以接受。如果到企业级，可以把 hash 计算放到离线索引任务或文件监听事件里。
+早期只靠 size 和 mtime_ns，速度快，但极端情况下不够强。现在 manifest 里也记录 sha256，能更可靠地识别文件内容变化。代价是启动扫描时需要读一遍 PDF 文件，所以它不是 O(1) 快速扫描；对于当前本地知识库规模可以接受。如果到企业级，可以把 hash 计算放到离线索引任务或文件监听事件里，或者先用 size/mtime 快速判断，再对可疑文件计算 hash。
 
 
 4. 混合检索到底怎么融合
