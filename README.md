@@ -1,6 +1,6 @@
-# 本地 PDF RAG 智能问答系统
+# TraceRAG
 
-面向本地 PDF 文档的 RAG（Retrieval-Augmented Generation，检索增强生成）问答系统。通过 collection 隔离、RRF 混合检索、HyDE 查询改写、CrossEncoder 精排和 IR 评测框架，为 LLM Agent 提供高质量、可追溯、可评测的知识检索能力。
+基于本地 PDF 文档的 RAG（Retrieval-Augmented Generation，检索增强生成）问答系统。通过 collection 隔离、RRF 混合检索、HyDE 查询改写、CrossEncoder 精排和 IR 评测框架，为 LLM Agent 提供高质量、可追溯、可评测的知识检索能力。
 
 ## 功能特性
 

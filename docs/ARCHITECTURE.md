@@ -1,4 +1,4 @@
-# Architecture
+# TraceRAG Architecture
 
 ## Pipeline
 

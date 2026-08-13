@@ -130,9 +130,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Local PDF RAG API",
+    title="TraceRAG API",
     description="A FastAPI service for local PDF RAG question answering.",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -200,7 +200,7 @@ def project_progress() -> dict[str, Any]:
         else []
     )
     return {
-        "name": "Local PDF RAG QA",
+        "name": "TraceRAG",
         "status": "ready" if rag_ready else "loading",
         "summary": "本地 PDF RAG 问答系统，支持 collection 隔离、RRF 混合检索、HyDE 查询改写、CrossEncoder 精排、引用回答和调用链日志。",
         "metrics": {
