@@ -1,2 +1,14 @@
-{"question":"What is the core topic of the document?","expected_sources":[],"any_keywords":[],"all_keywords":[]}
-{"question":"Which method or workflow does the document describe?","expected_sources":[],"any_keywords":[],"all_keywords":[]}
+{"question":"Dijkstra算法适合解决什么问题？", "collection":"algorithm", "relevant_sources":["第3章-图论基础.pdf", "第7章-图论提高.pdf"], "relevant_source_pages":[{"source":"第3章-图论基础.pdf","pages":[]}], "any_keywords":["Dijkstra","最短路径"], "all_keywords":[]}
+{"question":"动态规划的基本思想是什么？", "collection":"algorithm", "relevant_sources":["第5章-动态规划基础.pdf", "第9章-动态规划提高.pdf"], "relevant_source_pages":[], "any_keywords":["动态规划","状态"], "all_keywords":[]}
+{"question":"数据结构基础包括哪些内容？", "collection":"algorithm", "relevant_sources":["第2章-数据结构基础.pdf", "第6章-数据结构提高.pdf"], "relevant_source_pages":[], "any_keywords":["数据结构","栈","队列","链表"], "all_keywords":[]}
+{"question":"图论基础中有哪些图的遍历算法？", "collection":"algorithm", "relevant_sources":["第3章-图论基础.pdf"], "relevant_source_pages":[], "any_keywords":["DFS","BFS","遍历","深度优先","广度优先"], "all_keywords":[]}
+{"question":"数学提高章节涉及哪些数论知识？", "collection":"algorithm", "relevant_sources":["第8章-数学提高.pdf"], "relevant_source_pages":[], "any_keywords":["素数","gcd","数论","欧拉"], "all_keywords":[]}
+{"question":"ARP缓存中毒攻击的原理是什么？", "collection":"netsec_lab", "relevant_sources":["实验5 ARP缓存中毒实验指导书(1).pdf", "实验5 ARP缓存中毒ppt.pdf"], "relevant_source_pages":[], "any_keywords":["ARP","缓存","中毒","欺骗"], "all_keywords":[]}
+{"question":"Scapy工具的基本用法是什么？", "collection":"netsec_lab", "relevant_sources":["提前学习：Scapy的使用用法.pdf"], "relevant_source_pages":[], "any_keywords":["Scapy","数据包","构造","发送"], "all_keywords":[]}
+{"question":"数据包嗅探和欺骗实验的步骤是什么？", "collection":"netsec_lab", "relevant_sources":["实验1 数据包嗅探和欺骗实验指导书.pdf", "实验4 数据包嗅探和欺骗ppt.pdf"], "relevant_source_pages":[], "any_keywords":["嗅探","欺骗","数据包","抓包"], "all_keywords":[]}
+{"question":"TCP协议漏洞利用的攻击方式有哪些？", "collection":"netsec_lab", "relevant_sources":["实验1 TCP协议漏洞利用指导手册-2024.pdf"], "relevant_source_pages":[], "any_keywords":["TCP","漏洞","RST","劫持"], "all_keywords":[]}
+{"question":"PCB设计的基本流程是什么？", "collection":"pcb", "relevant_sources":["PCB设计指导(2021年9月）.pdf"], "relevant_source_pages":[], "any_keywords":["PCB","设计","布线","原理图"], "all_keywords":[]}
+{"question":"TCP/IP协议模型的分层结构是什么？", "collection":"tcpip", "relevant_sources":["TCPIP详解 卷1：协议.pdf"], "relevant_source_pages":[], "any_keywords":["TCP","IP","分层","协议栈","OSI"], "all_keywords":[]}
+{"question":"TCP事务协议的工作原理是什么？", "collection":"tcpip", "relevant_sources":["TCPIP详解 卷3：TCP事务协议、HTTP、NNTP和UNIX域协议.pdf"], "relevant_source_pages":[], "any_keywords":["TCP","事务","T/TCP"], "all_keywords":[]}
+{"question":"HTTP协议在TCP/IP体系中的位置和作用？", "collection":"tcpip", "relevant_sources":["TCPIP详解 卷3：TCP事务协议、HTTP、NNTP和UNIX域协议.pdf"], "relevant_source_pages":[], "any_keywords":["HTTP","应用层","协议"], "all_keywords":[]}
+{"question":"TCPIP详解卷2的实现部分讲了什么？", "collection":"tcpip", "relevant_sources":["TCPIP详解 卷2：实现.pdf"], "relevant_source_pages":[], "any_keywords":["实现","源码","BSD"], "all_keywords":[]}
