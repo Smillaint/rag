@@ -7,6 +7,8 @@ from sentence_transformers import CrossEncoder
 
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
 def load_reranker(model_name: str = "BAAI/bge-reranker-v2-m3"):

@@ -12,6 +12,8 @@ from rank_bm25 import BM25Okapi
 
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 EMBEDDING_MODEL_NAME = "BAAI/bge-m3"
 EMBEDDING_DIMENSION = 1024
