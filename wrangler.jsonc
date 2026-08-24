@@ -3,6 +3,14 @@
   "name": "smillick-org",
   "main": "worker/index.js",
   "compatibility_date": "2026-08-24",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "smillick.org/*",
+      "zone_name": "smillick.org"
+    }
+  ],
   "assets": {
     "directory": "./frontend",
     "binding": "ASSETS",
