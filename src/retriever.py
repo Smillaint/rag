@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 
 import jieba
@@ -117,17 +118,37 @@ def get_embedding_model() -> HuggingFaceEmbeddings:
         )
 
 
+def validate_batch_size(batch_size: int) -> int:
+    """Validate that *batch_size* is a positive integer.
+
+    Raises ValueError with a clear message otherwise. Returns the validated
+    value so callers can chain ``batch_size = validate_batch_size(batch_size)``.
+    """
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+        raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}.")
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be greater than 0, got {batch_size}.")
+    return batch_size
+
+
 def _chunk_ids(chunks: list[Document]) -> list[str]:
     return [str(chunk.metadata.get("chunk_id")) for chunk in chunks]
 
 
-def _batched(chunks: list[Document], batch_size: int) -> list[list[Document]]:
-    return [chunks[index:index + batch_size] for index in range(0, len(chunks), batch_size)]
+def _batched(chunks: list[Document], batch_size: int) -> Iterator[list[Document]]:
+    """Lazily yield successive *batch_size* slices from *chunks*.
+
+    Unlike a list materialisation this generator only ever holds one batch in
+    memory at a time, which matters for book-sized corpora. Callers must
+    consume the iterator; passing it to ``len()`` will raise TypeError.
+    """
+    validate_batch_size(batch_size)
+    for index in range(0, len(chunks), batch_size):
+        yield chunks[index:index + batch_size]
 
 
 def _add_documents_in_batches(vectorstore: Chroma, chunks: list[Document], batch_size: int) -> None:
-    if batch_size <= 0:
-        raise ValueError("batch_size must be greater than 0.")
+    validate_batch_size(batch_size)
     total = len(chunks)
     total_batches = (total + batch_size - 1) // batch_size
     for batch_number, batch in enumerate(_batched(chunks, batch_size), start=1):
