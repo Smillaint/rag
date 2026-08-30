@@ -416,10 +416,26 @@ async function handleRagHealth(request, env) {
     return methodNotAllowed(requestId, "GET, HEAD");
   }
 
-  return proxyToOrigin(request, env, "/health", {
-    method: request.method,
+  const upstreamResponse = await proxyToOrigin(request, env, "/health", {
+    method: "GET",
     includeAuth: false,
     requestId,
+  });
+
+  if (request.method !== "HEAD") {
+    return upstreamResponse;
+  }
+
+  const headers = new Headers(upstreamResponse.headers);
+  headers.set("Content-Length", "0");
+  try {
+    await upstreamResponse.body?.cancel();
+  } catch {}
+
+  return new Response(null, {
+    status: upstreamResponse.status,
+    statusText: upstreamResponse.statusText,
+    headers,
   });
 }
 

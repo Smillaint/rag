@@ -211,4 +211,26 @@ describe("RAG gateway worker", () => {
     expect(requestId).not.toBe("!!! invalid !!!");
     expect(requestId).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
   });
+
+  it("HEAD /health sends GET to origin and returns empty body with same status/headers", async () => {
+    let originMethod = null;
+    network.use(
+      http.get(`${ORIGIN}/health`, ({ request }) => {
+        originMethod = request.method;
+        return HttpResponse.json({ ready: true });
+      }),
+    );
+
+    const res = await callWorker(
+      makeRequest("/api/v1/rag/health", { method: "HEAD" }),
+    );
+
+    expect(originMethod).toBe("GET");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(res.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(res.headers.get("X-Request-ID")).toMatch(/^[A-Za-z0-9_-]+$/);
+  });
 });

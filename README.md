@@ -355,7 +355,7 @@ npm test
 
 | 文件 | 覆盖内容 |
 |---|---|
-| test/worker.test.js | Worker 网关 9 项：公开 health、鉴权 401、Bearer 代理 + origin key 替换、405 + Allow、415 非 JSON、413 超限、上游 502 脱敏、成功响应 + 安全头、X-Request-ID 替换 |
+| test/worker.test.js | Worker 网关 10 项：公开 health、HEAD→GET readiness（空 body + 安全头）、鉴权 401、Bearer 代理 + origin key 替换、405 + Allow、415 非 JSON、413 超限、上游 502 脱敏、成功响应 + 安全头、X-Request-ID 替换 |
 | test_loader_metadata.py | 分片元数据完整性（chunk_id、char_start/end、content_hash） |
 | test_generator_fallback.py | 抽取式降级回答生成 |
 | test_chain_context_expansion.py | 代码查询邻居扩展不跨 source 边界 |
@@ -365,7 +365,7 @@ npm test
 | test_batched.py | 惰性分批生成器、批次边界、无效 batch_size、validate_batch_size |
 | test_rebuild_vectorstore.py | argparse 默认值/override、模式判定、增量/全量 sync 参数 wiring |
 
-当前 Worker 测试 9 项，Python 测试 71 项，合计 80 项。
+当前 Worker 测试 10 项，Python 测试 71 项，合计 81 项。
 
 ## 注意事项
 
