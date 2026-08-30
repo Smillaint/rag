@@ -1,17 +1,22 @@
-# TraceRAG 公网部署指南（Cloudflare Tunnel + Windows 服务）
+# TraceRAG 公网部署指南（Cloudflare Worker 网关 + Tunnel + Windows 服务）
 
-本文档说明把 TraceRAG 从本机开发模式升级到「公网跨网 + 常驻后台」的完整步骤。
+本文档说明把 TraceRAG 从本机开发模式升级到「公网跨网 + 常驻后台」的完整步骤。生产主路径已切换为 Cloudflare Worker 网关，Tunnel 和 Windows 服务化作为源站运维层保留。
 
 ## 架构
 
 ```text
-TaffySearchTool 客户端（任意网络）
+客户端（任意网络）
    │
-   │  HTTPS（API Key 通过 Authorization 头传输）
+   │  HTTPS  https://smillick.org/api/v1/rag/*
+   │  Authorization: Bearer $RAG_GATEWAY_API_KEY
    ▼
-Cloudflare Edge（自动 TLS / DDoS 防护 / 全球加速）
+Cloudflare Edge → Worker smillick-org
+   │  公开 health / Bearer 鉴权 / 两级 Rate Limit / 安全头 / 上游错误脱敏
+   │  以独立 origin key 回源，不转发客户端凭证
+   ▼
+https://rag.smillick.org  （源站，客户端不应直连）
    │
-   │  出站加密隧道（QUIC 协议，无需开公网端口）
+   │  Cloudflare Tunnel（cloudflared，出站 QUIC，无需开公网端口）
    ▼
 cloudflared.exe（本机 Windows，NSSM 守护）
    │
@@ -25,10 +30,11 @@ TraceRAG（bge-m3 + bge-reranker + Chroma + BM25 + DeepSeek）
 
 **关键安全特性**：
 
-- 无需开防火墙入站端口，cloudflared 通过出站连接到 CF 边缘
-- 无需公网 IP / 域名证书，CF 自动处理 TLS
-- 应用层 API Key 中间件防止隧道被滥用
-- uvicorn 只监听 `127.0.0.1`，本机其他进程也无法绕过认证直接访问
+- 客户端只访问 `smillick.org`，Worker 处理鉴权、限流、安全头和错误脱敏。
+- `rag.smillick.org` 是源站地址，仅供 Worker 回源，普通客户端不应直连。
+- Worker 丢弃客户端凭证，以独立 `RAG_ORIGIN_API_KEY` 回源。
+- 无需开防火墙入站端口，cloudflared 通过出站连接到 CF 边缘。
+- uvicorn 只监听 `127.0.0.1`，本机其他进程也无法绕过认证直接访问。
 
 ---
 
@@ -44,13 +50,19 @@ pip install -r requirements.txt
 pip install -r requirements-dev.txt
 ```
 
-### 2. 模型下载（首次，约 4.4 GB）
+### 2. Node.js 与 Worker 依赖
+
+```powershell
+npm install
+```
+
+### 3. 模型下载（首次，约 4.4 GB）
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\download_models.py
 ```
 
-### 3. 配置 .env
+### 4. 配置 .env（源站侧密钥）
 
 ```powershell
 Copy-Item .env.example .env
@@ -62,11 +74,11 @@ notepad .env
 | 变量 | 说明 |
 |---|---|
 | `DEEPSEEK_API_KEY` | DeepSeek API Key |
-| `RAG_API_KEY` | **生成方法**：`python -c "import secrets; print(secrets.token_urlsafe(32))"`，客户端需要带这个 key |
+| `RAG_API_KEY` | FastAPI 源站应用层鉴权密钥。生成方法：`python -c "import secrets; print(secrets.token_urlsafe(32))"` |
 | `RAG_HOST` | 保持 `127.0.0.1`，由 cloudflared 反代 |
 | `RAG_PORT` | 默认 `8000` |
 
-### 4. 准备语料
+### 5. 准备语料
 
 把 PDF 放到 `data/` 子目录（参见 README）。
 
@@ -74,7 +86,7 @@ notepad .env
 
 ## 步骤 1：本地启动验证
 
-先确保 uvicorn 能正常起，再走隧道。
+先确保 uvicorn 能正常起，再走网关和隧道。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\start_server.ps1
@@ -92,21 +104,79 @@ curl http://127.0.0.1:8000/health
 # 无 key 调用 /ask，应该返回 401
 curl http://127.0.0.1:8000/ask -Method POST -ContentType "application/json" -Body '{"query":"test"}'
 # 预期：{"detail":"Missing or malformed Authorization header..."}
-
-# 带 key 调用
-$env:RAG_API_KEY = "你的 key"
-curl http://127.0.0.1:8000/ask `
-    -Method POST `
-    -Headers @{Authorization = "Bearer $env:RAG_API_KEY"} `
-    -ContentType "application/json" `
-    -Body '{"query":"Dijkstra算法适合解决什么问题？","collection":"algorithm"}'
 ```
 
 验证通过后 `Ctrl+C` 停止。
 
 ---
 
-## 步骤 2：快速隧道联调（一次性测试，无需域名）
+## 步骤 2：部署 Cloudflare Worker 网关
+
+### 2.1 配置 Worker 密钥
+
+Worker 需要两个密钥，通过 `wrangler secret put` 注入（不写入 `wrangler.jsonc`）：
+
+```powershell
+# 客户端鉴权密钥（客户端携带此 key 访问 smillick.org）
+npx wrangler secret put RAG_GATEWAY_API_KEY
+
+# Worker 回源时使用的独立 origin key
+npx wrangler secret put RAG_ORIGIN_API_KEY
+```
+
+每个命令会交互式提示输入值。密钥生成方法：
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+> **密钥关系**：
+> - `RAG_ORIGIN_API_KEY`（Worker secret）**必须**与源站 `.env` 中的 `RAG_API_KEY` 完全相同——Worker 用它重建 `Authorization` 头回源，FastAPI 用 `RAG_API_KEY` 校验。两者不一致则回源 401。
+> - `RAG_GATEWAY_API_KEY`（Worker secret）是客户端鉴权密钥，应与 `RAG_ORIGIN_API_KEY` 分离。
+> - 快速上线时三个 key 可以先用同一个值，但生产环境建议 `RAG_GATEWAY_API_KEY` 与 `RAG_ORIGIN_API_KEY` 分离并独立轮换；`RAG_ORIGIN_API_KEY` 与 `RAG_API_KEY` 始终成对相同，修改时需同步更新两端。
+
+`wrangler.jsonc` 中 `vars.RAG_ORIGIN_URL` 已固定为 `https://rag.smillick.org`，Rate Limit 绑定（`RAG_API_RATE_LIMITER` 120/60s、`RAG_ASK_RATE_LIMITER` 10/60s）已在配置中声明，无需手动设置。
+
+### 2.2 验证配置
+
+```powershell
+npm run check
+```
+
+输出应显示所有绑定（ASSETS、两个 Rate Limit、RAG_ORIGIN_URL），无 unsafe 警告，`--dry-run` 退出。
+
+### 2.3 部署到生产
+
+```powershell
+npm run deploy
+```
+
+部署后 Worker 接管 `smillick.org/*`，`/api/v1/rag/*` 路由由 Worker 处理，其余请求回退到静态资源。
+
+### 2.4 验证线上网关
+
+```powershell
+$base = "https://smillick.org/api/v1/rag"
+$key = "<你的 RAG_GATEWAY_API_KEY>"
+
+# 公开健康检查
+curl "$base/health"
+
+# 鉴权接口（无 key 应返回 401）
+curl "$base/collections"
+# 预期：{"error":"unauthorized","request_id":"..."}
+
+# 带 key 调用
+curl "$base/collections" -Headers @{Authorization = "Bearer $key"}
+```
+
+---
+
+## 步骤 3：Cloudflare Tunnel 配置（源站接入）
+
+Worker 通过 `https://rag.smillick.org` 回源，该地址由 Cloudflare Tunnel 转发到本机 `127.0.0.1:8000`。
+
+### 3.1 快速隧道联调（一次性测试，无需域名）
 
 开两个 PowerShell 窗口：
 
@@ -122,32 +192,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_server.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\start_tunnel_quick.ps1
 ```
 
-输出会包含一行：
+输出会包含一行 `https://<random>.trycloudflare.com`，当天有效，仅用于联调。
 
-```
-https://<random>.trycloudflare.com
-```
-
-从任意设备（手机、其他电脑）用这个 URL 测试：
+### 3.2 命名隧道 + 自定义域名（生产）
 
 ```powershell
-$base = "https://<random>.trycloudflare.com"
-curl "$base/health"
-curl "$base/ask" `
-    -Method POST `
-    -Headers @{Authorization = "Bearer $env:RAG_API_KEY"} `
-    -ContentType "application/json" `
-    -Body '{"query":"test"}'
-```
-
-**说明**：快速隧道生成的 URL 当天有效，重启 cloudflared 后失效。仅用于联调，不可用于生产。
-
----
-
-## 步骤 3：命名隧道 + 自定义域名（生产）
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\setup_cloudflared.ps1 -Domain "rag.yourdomain.com"
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_cloudflared.ps1 -Domain "rag.smillick.org"
 ```
 
 脚本会引导你：
@@ -155,16 +205,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup_cloudflared.ps1 -Domain
 1. 下载 `cloudflared.exe` 到 `.bin/`
 2. 浏览器登录 Cloudflare 选域名（生成 `cert.pem`）
 3. 创建命名隧道 `tracerag`（生成 credentials JSON）
-4. 绑定 DNS：`rag.yourdomain.com` → 隧道
+4. 绑定 DNS：`rag.smillick.org` → 隧道
 5. 生成 `cloudflared/config.yml`
 
-完成后**手动测试隧道**（让 cloudflared 读 config.yml）：
+完成后手动测试隧道：
 
 ```powershell
 .\.bin\cloudflared.exe tunnel run tracerag --config .\cloudflared\config.yml
 ```
 
-从任意设备验证 `https://rag.yourdomain.com/health`。
+从任意设备验证 `https://rag.smillick.org/health`（此地址仅供 Worker 回源，客户端应通过 `smillick.org` 访问）。
 
 ---
 
@@ -219,15 +269,37 @@ Restart-Service TraceRAG
 
 ---
 
+## 步骤 5：验证完整链路
+
+```powershell
+$base = "https://smillick.org/api/v1/rag"
+$key = "<你的 RAG_GATEWAY_API_KEY>"
+
+# 1. 公开健康检查（Worker → Tunnel → FastAPI）
+curl "$base/health"
+
+# 2. 鉴权接口
+curl "$base/collections" -Headers @{Authorization = "Bearer $key"}
+
+# 3. 问答
+curl "$base/ask" `
+    -Method POST `
+    -Headers @{Authorization = "Bearer $key"} `
+    -ContentType "application/json" `
+    -Body '{"query":"Dijkstra算法适合解决什么问题？","collection":"algorithm"}'
+```
+
+---
+
 ## 客户端配置
 
-在 TaffySearchTool 设置页（或配置文件）填入：
+在客户端应用中填入：
 
 | 字段 | 值 |
 |---|---|
-| RAG 服务地址 | `https://rag.yourdomain.com` |
-| RAG API Key | 与服务端 `RAG_API_KEY` 一致 |
-| 超时 | 60 秒（推荐 120 秒，bge-reranker CPU 精排约 6 秒） |
+| RAG 服务地址 | `https://smillick.org/api/v1/rag` |
+| RAG API Key | 与 Worker `RAG_GATEWAY_API_KEY` 一致 |
+| 超时 | 60 秒（推荐 120 秒，bge-reranker CPU 精排有一定延迟，需在目标机器上 benchmark） |
 
 客户端调用示例：
 
@@ -235,8 +307,8 @@ Restart-Service TraceRAG
 import urllib.request, json
 
 req = urllib.request.Request(
-    "https://rag.yourdomain.com/ask",
-    data=json.dumps({"query": "塔菲在哪天玩了空洞骑士", "collection": "taffy_replays"}).encode(),
+    "https://smillick.org/api/v1/rag/ask",
+    data=json.dumps({"query": "Dijkstra算法适合解决什么问题？", "collection": "algorithm"}).encode(),
     headers={
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -270,7 +342,17 @@ New-NetFirewallRule -DisplayName "Allow cloudflared outbound" `
 
 ## 故障排查
 
-### 服务启动失败
+### Worker 部署问题
+
+```powershell
+# 验证配置和绑定
+npm run check
+
+# 查看 Worker 实时日志
+npx wrangler tail
+```
+
+### 源站服务启动失败
 
 ```powershell
 # 查看错误日志
@@ -300,10 +382,20 @@ Restart-Service cloudflared
 
 uvicorn 还在加载模型（首次启动 1-2 分钟）。等 30 秒后重试 `/health`。
 
-### 401 / 403
+### 401 / 403 / 429
 
-- 401 `Missing Authorization header`：客户端没带 `Authorization: Bearer <key>` 头
-- 403 `Invalid API key`：客户端 key 与服务端 `.env` 中的 `RAG_API_KEY` 不一致
+- 401 `unauthorized`：客户端没带 `Authorization: Bearer <key>` 头，或 key 与 Worker `RAG_GATEWAY_API_KEY` 不一致。
+- 429 `rate_limited`：超过 Rate Limit（API 120/60s，ask 10/60s），等待 `Retry-After` 秒后重试。
+- 503 `rate_limiter_unavailable`：Rate Limit 绑定缺失或异常，检查 `wrangler.jsonc` 中的 `ratelimits` 配置。
+
+### 502 upstream_error / upstream_unavailable
+
+Worker 已收到请求但回源失败。检查 Tunnel 服务是否运行、FastAPI 是否监听 `127.0.0.1:8000`。
+
+```powershell
+Restart-Service cloudflared
+Restart-Service TraceRAG
+```
 
 ### 隧道连不上
 
@@ -319,11 +411,12 @@ Restart-Service cloudflared
 
 ## 安全建议
 
-1. **API Key 不要硬编码到客户端代码或 git 仓库**。TaffySearchTool 的 `settings.ini` 已被 `.gitignore` 忽略。
-2. **`.env` 不要提交 git**。已加 `.gitignore`。
-3. **定期轮换 API Key**：改 `.env` 后 `Restart-Service TraceRAG`。
-4. **cloudflared 配置文件路径白名单**：`config.yml` 的 `path` 字段限制只暴露 `/health`、`/ask`、`/collections`、`/stats`、`/ingest`，其他路径在 CF 边缘就 404。
+1. **密钥不要硬编码到客户端代码或 git 仓库**。`.env` 已被 `.gitignore` 忽略；Worker 密钥通过 `wrangler secret put` 注入，不落盘到配置文件。
+2. **密钥分离与轮换**：`RAG_ORIGIN_API_KEY`（Worker secret）必须与源站 `.env` 的 `RAG_API_KEY` 完全相同，否则回源 401；两者始终成对更新。`RAG_GATEWAY_API_KEY` 应与 `RAG_ORIGIN_API_KEY` 分离并独立轮换。快速上线时三个 key 可以相同，但生产环境建议 gateway 和 origin 分离。
+3. **定期轮换密钥**：改 Worker secret 后无需重新部署（下次请求生效）；改 `.env` 后 `Restart-Service TraceRAG`。
+4. **cloudflared 配置文件路径白名单**：`config.yml` 的 `path` 字段限制只暴露必要路径。
 5. **如果担心 CF 隧道被滥用**，可在 Cloudflare Zero Trust 控制台启用 Access Policy，加一层邮件 OTP 验证。
+6. **`rag.smillick.org` 不应暴露给客户端**：它是 Worker 回源专用地址。即使被直连，FastAPI 的 `RAG_API_KEY` 中间件仍会鉴权，但客户端将失去网关层 Bearer 鉴权、Rate Limit、统一错误脱敏、安全头和 request-id 追踪。客户端应始终通过 `smillick.org/api/v1/rag/*` 访问。
 
 ---
 
@@ -335,23 +428,28 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_services.ps1 -Uninsta
 
 会停止并删除 `TraceRAG` 和 `cloudflared` 两个服务。`.bin/`、`logs/`、`cloudflared/` 目录保留。
 
+Worker 部署可通过 `npx wrangler delete` 删除（会同时删除路由和 Rate Limit 绑定）。
+
 ---
 
 ## 文件清单
 
-本次部署新增/修改的文件：
-
 ```
 rag_project/
-├─ .env.example                       完整配置模板
-├─ server.py                          加 API Key 中间件
+├─ .env.example                       源站配置模板
+├─ .env                               实际配置（gitignore）
+├─ wrangler.jsonc                     Worker 配置（路由、绑定、Rate Limit）
+├─ worker/
+│  └─ index.js                        Cloudflare Worker 网关
+├─ server.py                          FastAPI 源站入口
 ├─ cloudflared/
 │  └─ config.yml.example              隧道路由模板
-└─ scripts/
-   ├─ start_server.ps1                手动启动 uvicorn
-   ├─ setup_cloudflared.ps1           命名隧道引导
-   ├─ start_tunnel_quick.ps1          快速隧道测试
-   └─ install_services.ps1            NSSM 服务化
+├─ scripts/
+│  ├─ start_server.ps1                手动启动 uvicorn
+│  ├─ rebuild_vectorstore.py          向量库重建/增量同步
+│  ├─ setup_cloudflared.ps1           命名隧道引导
+│  ├─ start_tunnel_quick.ps1          快速隧道测试
+│  └─ install_services.ps1            NSSM 服务化
 ```
 
 运行时生成的目录：
@@ -359,10 +457,12 @@ rag_project/
 ```
 rag_project/
 ├─ .bin/                              cloudflared.exe + nssm.exe
+├─ .wrangler/                         Wrangler 本地状态（gitignore）
+├─ node_modules/                      Worker 依赖（gitignore）
 ├─ logs/
 │  ├─ nssm_stdout.log                 TraceRAG 服务 stdout
 │  ├─ nssm_stderr.log                 TraceRAG 服务 stderr
-│  └─ YYYY-MM-DD.jsonl                RAG 调用链日志（原有）
+│  └─ YYYY-MM-DD.jsonl                RAG 调用链日志
 └─ cloudflared/
    ├─ cert.pem                        Cloudflare 账户证书
    ├─ <uuid>.json                     隧道 credentials

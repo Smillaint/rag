@@ -1,5 +1,68 @@
 # TraceRAG Architecture
 
+## Public Request Chain
+
+```text
+Client (any network)
+  │  HTTPS
+  ▼
+Cloudflare Edge → Worker smillick-org (smillick.org/*)
+  │  run_worker_first: Worker intercepts /api/v1/rag/* before static assets
+  │
+  ├─ GET/HEAD /api/v1/rag/health        public, no auth, proxies origin
+  ├─ GET     /api/v1/rag/collections    Bearer auth + API rate limit (120/60s)
+  ├─ GET     /api/v1/rag/stats          Bearer auth + API rate limit (120/60s)
+  └─ POST    /api/v1/rag/ask            Bearer auth + Ask rate limit (10/60s) + 65 536-byte body cap
+  │
+  │  Worker rebuilds Authorization: Bearer $RAG_ORIGIN_API_KEY (never forwards client credentials)
+  ▼
+https://rag.smillick.org  (origin — clients must not connect directly)
+  │
+  │  Cloudflare Tunnel (cloudflared, outbound QUIC, no inbound ports)
+  ▼
+127.0.0.1:8000  FastAPI + Uvicorn
+  │
+  ▼
+TraceRAG Pipeline (bge-m3 + Chroma + BM25 + bge-reranker + DeepSeek)
+```
+
+**Key design rule**: `rag.smillick.org` is an origin-only hostname. The Worker is the sole public entry point. Clients that bypass the Worker still hit FastAPI's `RAG_API_KEY` authentication, but lose the gateway-layer Bearer auth, rate limiting, unified error sanitization, request-id tracing, and security headers.
+
+## Trust Boundaries
+
+| Boundary | Mechanism |
+|---|---|
+| Client → Worker | Bearer token (`RAG_GATEWAY_API_KEY`) checked via constant-time comparison. Failed auth returns 401 before rate limiting or origin call. |
+| Worker → Origin | Worker discards the client token and reconstructs `Authorization: Bearer $RAG_ORIGIN_API_KEY`. This value **must match** the FastAPI `.env` `RAG_API_KEY` exactly — otherwise the origin returns 401. The origin never sees client credentials. |
+| Worker → Origin transport | Cloudflare Tunnel (outbound QUIC). No inbound firewall ports on the origin host. Uvicorn binds `127.0.0.1` only. |
+| Origin app layer | `RAG_API_KEY` middleware on FastAPI validates the incoming origin key. `RAG_ORIGIN_API_KEY` (Wrangler secret) and `RAG_API_KEY` (.env) are always a matched pair. `RAG_GATEWAY_API_KEY` should be separate from both and independently rotatable. |
+
+## Worker Gateway Behavior
+
+### Authentication and Rate Limiting
+
+1. **Authenticate first**: `proxyProtected` calls `authenticateGateway` before any rate-limiter call.
+2. **Stable rate-limit key**: derived from `SHA-256(token:route)`, truncated to 32 hex chars. Non-secret — safe to log. Binds rate limits to the authenticated identity + route, not to IP alone.
+3. **Two-tier limits**:
+   - `RAG_API_RATE_LIMITER`: 120 requests / 60 s (collections, stats).
+   - `RAG_ASK_RATE_LIMITER`: 10 requests / 60 s (ask).
+4. **Fail closed**: if a limiter binding is missing or throws, the Worker returns 503 JSON `{"error":"rate_limiter_unavailable"}` with `Retry-After: 60`. It never falls through to the origin.
+
+### Request Handling
+
+- **X-Request-ID**: validated against `^[A-Za-z0-9_-]{1,128}$`. Malformed IDs are replaced with a fresh UUID. Every response (including errors) carries the validated ID.
+- **Cache-Control: no-store** on every RAG response, including 405, 401, 413, 415, 429, 502, 503, and streamed 2xx.
+- **Security headers**: CSP, X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy, COOP — applied to all responses including static assets.
+- **Body limit**: `/ask` enforces 65 536-byte cap via `Content-Length` pre-check + streamed body metering. Oversized requests return 413 without calling the origin.
+- **Content-Type**: `/ask` requires `application/json`; other media types return 415.
+- **Method enforcement**: `/collections` and `/stats` accept GET only; `/ask` accepts POST only. Wrong methods return 405 with `Allow` header.
+- **Upstream error sanitization**: non-2xx origin responses are discarded (body cancelled). The client receives a safe 502 JSON `{"error":"upstream_error"}` with the request ID — never the upstream body or status.
+- **Streaming**: only successful (2xx) origin responses are streamed back to the client.
+
+### Structured Logging
+
+`logEvent` emits JSON lines with timestamp, level, event name, request ID, path, and relevant fields. No secrets, tokens, or API keys appear in logs.
+
 ## Pipeline
 
 ```text
@@ -18,7 +81,7 @@ User query
 
 `server.py` wraps the pipeline with FastAPI. The service loads `RAGPipeline` once during application startup (via `lifespan`) and reuses the in-memory PDF chunks, BM25 index, vector store handle, reranker, and model client for each request.
 
-Endpoints:
+Endpoints (origin paths, proxied by the Worker under `/api/v1/rag/`):
 
 - `GET /health`: readiness check.
 - `GET /stats`: loaded document, page, chunk, and model statistics.
@@ -34,6 +97,56 @@ The `/ask` response includes:
 - `citations`: chunk number, source, page, and chunk_id for each cited passage.
 - `sources`: full metadata (source_path, collection, page, chunk_id, chunk_index, char_start, char_end, preview).
 - `trace`: HyDE status, RRF fusion scores, rerank scores, timing breakdown (hyde / retrieval / rerank / generation / total).
+
+## Failure and Degradation
+
+| Failure | Behavior |
+|---|---|
+| Missing/invalid client token | 401 JSON, no origin call, no rate-limiter call. |
+| Rate limiter binding missing or throws | 503 JSON `rate_limiter_unavailable`, `Retry-After: 60`, no origin call. |
+| Rate limit exceeded | 429 JSON `rate_limited`, `Retry-After: 60`. |
+| Origin fetch throws (network) | 502 JSON `upstream_unavailable`. |
+| Origin returns non-2xx | 502 JSON `upstream_error`; upstream body discarded and cancelled. |
+| Vector search throws (origin-side) | BM25-only retrieval (pipeline-level, within FastAPI). |
+| LLM API unavailable | Extractive fallback answer from retrieved passages. |
+| Worker unhandled exception | 500 JSON `internal_error` with request ID; structured error log. |
+
+Every error response includes `X-Request-ID`, `Cache-Control: no-store`, and the full security header set.
+
+## Index Data Flow
+
+```text
+data/**/*.pdf
+  │
+  ▼
+_pdf_inventory()                    sha256 + mtime fingerprint per file
+  │
+  ▼
+load_or_update_chunks()             compare cached manifest fingerprints
+  ├─ cache hit    → load chunks.jsonl as-is
+  ├─ incompatible → full re-parse, re-chunk, re-cache
+  └─ incremental  → re-parse changed sources, drop deleted, merge, re-cache
+  │
+  ▼
+IndexUpdateResult
+  chunks, changed_sources, deleted_sources, deleted_chunk_ids, full_rebuild
+  │
+  ▼
+sync_vectorstore()
+  ├─ full_rebuild=True        → wipe persist_dir, rebuild Chroma, write .embedding_meta.json
+  ├─ no persist dir           → build fresh
+  └─ incremental               → delete stale chunk_ids, add only changed-source chunks
+  │
+  ▼
+_embedding_meta.json               model + dimension fingerprint for drift detection
+  │
+  ▼
+Chroma persist_directory             batched via lazy generator (_batched), batch_size=128
+```
+
+**Lazy batching**: `_batched` is a generator that yields one batch at a time (`Iterator[list[Document]]`), so memory usage stays flat regardless of corpus size. `validate_batch_size` enforces positive-integer validation in one reusable place, called by both `_batched` and `_add_documents_in_batches`.
+
+**Embedding drift detection**: if `.embedding_meta.json` records a different model or dimension, `sync_vectorstore` forces a full rebuild to prevent vector-dimension corruption.
 
 ## Design Choices
 
@@ -77,4 +190,5 @@ The `/ask` response includes:
 - `src/query_rewrite.py`: multi-query expansion or query decomposition.
 - `src/evaluate.py`: add answer faithfulness metrics (RAGAS-style LLM judge) or expand eval case coverage.
 - `src/chain.py`: add streaming generation, multi-turn context, or function-calling for agentic retrieval.
+- `worker/index.js`: add new protected routes or adjust rate-limit thresholds in `wrangler.jsonc`.
 - `server.py`: expose pipeline as MCP tools for IDE/Agent integration.
