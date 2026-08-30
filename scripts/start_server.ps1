@@ -71,7 +71,7 @@ $ApiKey = [Environment]::GetEnvironmentVariable("RAG_API_KEY")
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
     Write-Warning "RAG_API_KEY 未设置；服务将以无认证模式运行。仅适用于本机开发，公网部署必须设置。"
 } else {
-    Write-Host "API Key 已加载（长度 $($ApiKey.Length)，前 4 位：$($ApiKey.Substring(0, [Math]::Min(4, $ApiKey.Length)))...）"
+    Write-Host "API Key 已加载"
 }
 
 if ($Dev) {

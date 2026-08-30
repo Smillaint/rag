@@ -2,6 +2,8 @@ const RAG_HEALTH_URL = "https://rag.smillick.org/health";
 const RELEASE_URL = "https://github.com/Smillaint/Ace-Taffy-Wiki-Tool/releases/latest";
 const STATUS_TIMEOUT_MS = 5000;
 const RAG_ASK_MAX_BODY_BYTES = 65536;
+const REQUEST_ID_MAX_LENGTH = 128;
+const REQUEST_ID_PATTERN = new RegExp(`^[A-Za-z0-9_-]{1,${REQUEST_ID_MAX_LENGTH}}$`);
 
 const SECURITY_HEADERS = Object.freeze({
   "Content-Security-Policy": [
@@ -46,66 +48,21 @@ function jsonResponse(payload, init = {}) {
   );
 }
 
-async function fetchRagStatus() {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), STATUS_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(RAG_HEALTH_URL, {
-      headers: {
-        Accept: "application/json",
-      },
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      return {
-        available: false,
-        status: "unavailable",
-      };
-    }
-
-    const payload = await response.json();
-    return {
-      available: Boolean(payload.ready),
-      status: payload.ready ? "ready" : "loading",
-    };
-  } catch {
-    return {
-      available: false,
-      status: "unavailable",
-    };
-  } finally {
-    clearTimeout(timeoutId);
+function logEvent(level, event, fields = {}) {
+  const entry = { ts: new Date().toISOString(), level, event, ...fields };
+  const line = JSON.stringify(entry);
+  if (level === "error" || level === "warn") {
+    console.error(line);
+  } else {
+    console.log(line);
   }
-}
-
-async function handleStatusRequest(request) {
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    return jsonResponse(
-      { error: "method_not_allowed" },
-      {
-        status: 405,
-        headers: {
-          Allow: "GET, HEAD",
-        },
-      },
-    );
-  }
-
-  const rag = await fetchRagStatus();
-  return jsonResponse({
-    service: "smillick.org",
-    status: "ok",
-    rag,
-  });
 }
 
 function ensureRequestId(request) {
   const existing = request.headers.get("X-Request-ID");
   if (existing) {
     const trimmed = existing.trim();
-    if (trimmed.length > 0) {
+    if (REQUEST_ID_PATTERN.test(trimmed)) {
       return trimmed;
     }
   }
@@ -162,22 +119,33 @@ async function authenticateGateway(request, env) {
   const gatewayKey = env.RAG_GATEWAY_API_KEY;
   const clientToken = extractClientToken(request);
   if (!clientToken || !gatewayKey) {
-    return false;
+    return null;
   }
 
-  return constantTimeEquals(clientToken, gatewayKey);
+  const valid = await constantTimeEquals(clientToken, gatewayKey);
+  return valid ? clientToken : null;
 }
 
-async function applyRateLimiter(limiter, request) {
-  if (!limiter || typeof limiter.limit !== "function") {
-    return { success: true };
+async function deriveRateLimitKey(token, route) {
+  const enc = new TextEncoder();
+  const digest = await crypto.subtle.digest("SHA-256", enc.encode(`${token}:${route}`));
+  const bytes = new Uint8Array(digest);
+  let hex = "";
+  for (const b of bytes) {
+    hex += b.toString(16).padStart(2, "0");
   }
+  return hex.slice(0, 32);
+}
 
-  const key = request.headers.get("CF-Connecting-IP") || "shared";
+async function applyRateLimiter(limiter, key) {
+  if (!limiter || typeof limiter.limit !== "function") {
+    return { ok: false, reason: "binding_missing" };
+  }
   try {
-    return await limiter.limit({ key });
+    const result = await limiter.limit({ key });
+    return { ok: true, result };
   } catch {
-    return { success: true };
+    return { ok: false, reason: "threw" };
   }
 }
 
@@ -252,11 +220,25 @@ function errorResponse(requestId, error, status, extraHeaders = {}) {
   return jsonResponse({ error, request_id: requestId }, { status, headers });
 }
 
+function methodNotAllowed(requestId, allow) {
+  return errorResponse(requestId, "method_not_allowed", 405, { Allow: allow });
+}
+
+function isJsonContentType(header) {
+  if (!header) {
+    return false;
+  }
+  const semi = header.indexOf(";");
+  const mediaType = (semi >= 0 ? header.slice(0, semi) : header).trim().toLowerCase();
+  return mediaType === "application/json";
+}
+
 function streamUpstreamResponse(upstreamResponse, requestId) {
   const headers = new Headers(upstreamResponse.headers);
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
     headers.set(name, value);
   }
+  headers.set("Cache-Control", "no-store");
   headers.set("X-Request-ID", requestId);
 
   return new Response(upstreamResponse.body, {
@@ -266,12 +248,73 @@ function streamUpstreamResponse(upstreamResponse, requestId) {
   });
 }
 
+async function fetchRagStatus() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), STATUS_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(RAG_HEALTH_URL, {
+      headers: {
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return {
+        available: false,
+        status: "unavailable",
+      };
+    }
+
+    const payload = await response.json();
+    return {
+      available: Boolean(payload.ready),
+      status: payload.ready ? "ready" : "loading",
+    };
+  } catch {
+    return {
+      available: false,
+      status: "unavailable",
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function handleStatusRequest(request) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return jsonResponse(
+      { error: "method_not_allowed" },
+      {
+        status: 405,
+        headers: {
+          Allow: "GET, HEAD",
+        },
+      },
+    );
+  }
+
+  const rag = await fetchRagStatus();
+  return jsonResponse({
+    service: "smillick.org",
+    status: "ok",
+    rag,
+  });
+}
+
 async function proxyToOrigin(request, env, path, options = {}) {
   const method = options.method || request.method;
   const requestId = options.requestId || ensureRequestId(request);
   const includeAuth = options.includeAuth !== undefined ? options.includeAuth : true;
 
   if (!env.RAG_ORIGIN_URL) {
+    logEvent("error", "origin_not_configured", { request_id: requestId, path });
+    return errorResponse(requestId, "origin_not_configured", 502);
+  }
+
+  if (includeAuth && !env.RAG_ORIGIN_API_KEY) {
+    logEvent("error", "origin_api_key_not_configured", { request_id: requestId, path });
     return errorResponse(requestId, "origin_not_configured", 502);
   }
 
@@ -284,12 +327,18 @@ async function proxyToOrigin(request, env, path, options = {}) {
       if (contentLength) {
         const parsed = Number(contentLength);
         if (Number.isFinite(parsed) && parsed > options.maxBodyBytes) {
+          logEvent("warn", "request_too_large", {
+            request_id: requestId,
+            path,
+            content_length: parsed,
+          });
           return errorResponse(requestId, "request_too_large", 413);
         }
       }
 
       const result = await readBoundedBody(request.body, options.maxBodyBytes);
       if (!result.ok) {
+        logEvent("warn", "request_too_large", { request_id: requestId, path });
         return errorResponse(requestId, "request_too_large", 413);
       }
       body = result.buffer;
@@ -302,25 +351,54 @@ async function proxyToOrigin(request, env, path, options = {}) {
   try {
     upstreamResponse = await fetch(originUrl(env, path), { method, headers, body });
   } catch {
+    logEvent("error", "upstream_unavailable", { request_id: requestId, path });
     return errorResponse(requestId, "upstream_unavailable", 502);
   }
 
-  return streamUpstreamResponse(upstreamResponse, requestId);
+  if (upstreamResponse.status >= 200 && upstreamResponse.status < 300) {
+    return streamUpstreamResponse(upstreamResponse, requestId);
+  }
+
+  try {
+    await upstreamResponse.body?.cancel();
+  } catch {}
+
+  logEvent("error", "upstream_error", {
+    request_id: requestId,
+    path,
+    upstream_status: upstreamResponse.status,
+  });
+  return errorResponse(requestId, "upstream_error", 502);
 }
 
 async function proxyProtected(request, env, path, rateLimiter, options = {}) {
-  const requestId = ensureRequestId(request);
+  const requestId = options.requestId || ensureRequestId(request);
 
-  const rateLimitResult = await applyRateLimiter(rateLimiter, request);
-  if (rateLimitResult && rateLimitResult.success === false) {
-    return errorResponse(requestId, "rate_limited", 429, { "Retry-After": "60" });
-  }
-
-  const authenticated = await authenticateGateway(request, env);
-  if (!authenticated) {
+  const clientToken = await authenticateGateway(request, env);
+  if (!clientToken) {
+    logEvent("warn", "auth_failed", { request_id: requestId, path });
     return errorResponse(requestId, "unauthorized", 401, {
       "WWW-Authenticate": 'Bearer realm="rag"',
     });
+  }
+
+  const rateLimitKey = await deriveRateLimitKey(clientToken, path);
+
+  const rateLimitOutcome = await applyRateLimiter(rateLimiter, rateLimitKey);
+  if (!rateLimitOutcome.ok) {
+    logEvent("error", "rate_limiter_unavailable", {
+      request_id: requestId,
+      path,
+      reason: rateLimitOutcome.reason,
+    });
+    return errorResponse(requestId, "rate_limiter_unavailable", 503, {
+      "Retry-After": "60",
+    });
+  }
+
+  if (rateLimitOutcome.result && rateLimitOutcome.result.success === false) {
+    logEvent("warn", "rate_limited", { request_id: requestId, path });
+    return errorResponse(requestId, "rate_limited", 429, { "Retry-After": "60" });
   }
 
   return proxyToOrigin(request, env, path, {
@@ -332,92 +410,106 @@ async function proxyProtected(request, env, path, rateLimiter, options = {}) {
 }
 
 async function handleRagHealth(request, env) {
+  const requestId = ensureRequestId(request);
+
   if (request.method !== "GET" && request.method !== "HEAD") {
-    return jsonResponse(
-      { error: "method_not_allowed" },
-      { status: 405, headers: { Allow: "GET, HEAD" } },
-    );
+    return methodNotAllowed(requestId, "GET, HEAD");
   }
 
   return proxyToOrigin(request, env, "/health", {
     method: request.method,
     includeAuth: false,
+    requestId,
   });
 }
 
 async function handleRagCollections(request, env) {
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    return jsonResponse(
-      { error: "method_not_allowed" },
-      { status: 405, headers: { Allow: "GET, HEAD" } },
-    );
+  const requestId = ensureRequestId(request);
+
+  if (request.method !== "GET") {
+    return methodNotAllowed(requestId, "GET");
   }
 
   return proxyProtected(request, env, "/collections", env.RAG_API_RATE_LIMITER, {
-    method: request.method,
+    method: "GET",
+    requestId,
   });
 }
 
 async function handleRagStats(request, env) {
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    return jsonResponse(
-      { error: "method_not_allowed" },
-      { status: 405, headers: { Allow: "GET, HEAD" } },
-    );
+  const requestId = ensureRequestId(request);
+
+  if (request.method !== "GET") {
+    return methodNotAllowed(requestId, "GET");
   }
 
   return proxyProtected(request, env, "/stats", env.RAG_API_RATE_LIMITER, {
-    method: request.method,
+    method: "GET",
+    requestId,
   });
 }
 
 async function handleRagAsk(request, env) {
+  const requestId = ensureRequestId(request);
+
   if (request.method !== "POST") {
-    return jsonResponse(
-      { error: "method_not_allowed" },
-      { status: 405, headers: { Allow: "POST" } },
-    );
+    return methodNotAllowed(requestId, "POST");
+  }
+
+  if (!isJsonContentType(request.headers.get("Content-Type"))) {
+    return errorResponse(requestId, "unsupported_media_type", 415);
   }
 
   return proxyProtected(request, env, "/ask", env.RAG_ASK_RATE_LIMITER, {
     method: "POST",
+    requestId,
     maxBodyBytes: RAG_ASK_MAX_BODY_BYTES,
   });
 }
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
 
-    if (url.pathname === "/api/status" || url.pathname === "/health") {
-      return handleStatusRequest(request);
+      if (url.pathname === "/api/status" || url.pathname === "/health") {
+        return handleStatusRequest(request);
+      }
+
+      if (url.pathname === "/download") {
+        return Response.redirect(RELEASE_URL, 302);
+      }
+
+      if (url.pathname === "/api/v1/rag/health") {
+        return handleRagHealth(request, env);
+      }
+
+      if (url.pathname === "/api/v1/rag/collections") {
+        return handleRagCollections(request, env);
+      }
+
+      if (url.pathname === "/api/v1/rag/stats") {
+        return handleRagStats(request, env);
+      }
+
+      if (url.pathname === "/api/v1/rag/ask") {
+        return handleRagAsk(request, env);
+      }
+
+      if (url.pathname.startsWith("/api/")) {
+        const requestId = ensureRequestId(request);
+        return errorResponse(requestId, "not_found", 404);
+      }
+
+      const response = await env.ASSETS.fetch(request);
+      return withSecurityHeaders(response);
+    } catch (e) {
+      const requestId = ensureRequestId(request);
+      logEvent("error", "internal_error", {
+        request_id: requestId,
+        error: String((e && e.name) || e),
+      });
+      return errorResponse(requestId, "internal_error", 500);
     }
-
-    if (url.pathname === "/download") {
-      return Response.redirect(RELEASE_URL, 302);
-    }
-
-    if (url.pathname === "/api/v1/rag/health") {
-      return handleRagHealth(request, env);
-    }
-
-    if (url.pathname === "/api/v1/rag/collections") {
-      return handleRagCollections(request, env);
-    }
-
-    if (url.pathname === "/api/v1/rag/stats") {
-      return handleRagStats(request, env);
-    }
-
-    if (url.pathname === "/api/v1/rag/ask") {
-      return handleRagAsk(request, env);
-    }
-
-    if (url.pathname.startsWith("/api/")) {
-      return jsonResponse({ error: "not_found" }, { status: 404 });
-    }
-
-    const response = await env.ASSETS.fetch(request);
-    return withSecurityHeaders(response);
   },
 };

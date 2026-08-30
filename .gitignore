@@ -28,3 +28,10 @@ rebuild_*.log
 # Local development notes (not for remote)
 WORK_NOTES.md
 
+# Node.js dependencies
+node_modules/
+
+# Wrangler local state
+.wrangler/
+.dev.vars
+
