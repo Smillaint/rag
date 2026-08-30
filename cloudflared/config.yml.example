@@ -1,0 +1,49 @@
+# =============================================================================
+# Cloudflare Tunnel 命名隧道配置模板
+#
+# 使用方法：
+#   1. 复制为 config.yml（同目录）
+#   2. 把 <TUNNEL_UUID> 替换为 cloudflared tunnel list 显示的 UUID
+#   3. 把 <YOUR_DOMAIN> 替换为你的域名（如 rag.example.com）
+#   4. credentials-file 路径保持默认（cloudflared 会在首次创建时生成）
+#
+# 首次创建隧道：
+#   cloudflared.exe tunnel login
+#   cloudflared.exe tunnel create tracerag
+#   cloudflared.exe tunnel route dns tracerag <YOUR_DOMAIN>
+# =============================================================================
+
+tunnel: <TUNNEL_UUID>
+credentials-file: C:\Users\31854\rag_project\cloudflared\<TUNNEL_UUID>.json
+
+# 转发到本地 uvicorn（仅监听 127.0.0.1，不暴露到公网/局域网）
+ingress:
+  - hostname: <YOUR_DOMAIN>
+    service: http://127.0.0.1:8000
+    originRequest:
+      # 上游是明文 HTTP，无需 TLS 验证
+      noTLSVerify: true
+      # 长连接配置（RAG 检索可能耗时，避免被 CF 边缘提前断开）
+      connectTimeout: 120s
+      tcpKeepAlive: 30s
+      keepAliveTimeout: 90s
+      keepAliveConnections: 10
+      # 不要让 CF 缓存 RAG 响应（每次问答不同）
+      disableChunkedEncoding: false
+      http2Origin: false
+    # 路径白名单：只允许这些路径对外暴露
+    # 其他路径会被 404 拦截
+    path:
+      - /health
+      - /ask
+      - /collections
+      - /stats
+      - /ingest
+  # 兜底：未匹配的 hostname 返回 404
+  - service: http_status:404
+
+# 日志
+loglevel: info
+transport:
+  protocol: quic      # QUIC 比 HTTP2 更稳，弱网下不易断
+  heartbeatInterval: 30s

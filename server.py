@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from main import load_local_env
 from src.chain import RAGPipeline
 from src.corpus_stats import build_corpus_stats
 from src.loader import list_pdf_collections
+from src.mcp_server import build_mcp_server
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +141,55 @@ app = FastAPI(
 
 if FRONTEND_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR)), name="assets")
+
+
+# -----------------------------------------------------------------------------
+# 应用层 API Key 认证
+# - 设置 RAG_API_KEY 后，所有非白名单路径必须带 Authorization: Bearer <key>
+# - 留空则跳过认证（仅本机开发使用）
+# - /health 用于探活，不需要认证
+# - /docs、/openapi.json、/redoc 仅在未设置 API Key 时可访问（开发模式）
+# -----------------------------------------------------------------------------
+UNAUTHENTICATED_PATHS = {"/health"}
+
+
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    """Reject requests without a valid Bearer token when RAG_API_KEY is set."""
+
+    async def dispatch(self, request: Request, call_next):
+        api_key = os.getenv("RAG_API_KEY", "").strip()
+        if not api_key:
+            return await call_next(request)  # 开发模式：未设置 key 则放行
+
+        path = request.url.path
+        if path in UNAUTHENTICATED_PATHS:
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                {"detail": "Missing or malformed Authorization header; expected 'Bearer <key>'."},
+                status_code=401,
+            )
+        token = auth_header.removeprefix("Bearer ").strip()
+        if not secrets.compare_digest(token, api_key):
+            return JSONResponse({"detail": "Invalid API key."}, status_code=403)
+        return await call_next(request)
+
+
+app.add_middleware(ApiKeyMiddleware)
+
+
+def _get_pipeline_or_none() -> "RAGPipeline | None":
+    return pipeline
+
+
+def _get_data_dir() -> str:
+    return os.getenv("RAG_DATA_DIR", "./data")
+
+
+mcp_server = build_mcp_server(_get_pipeline_or_none, _get_data_dir)
+app.mount("/mcp", mcp_server.streamable_http_app())
 
 
 def get_pipeline() -> RAGPipeline:

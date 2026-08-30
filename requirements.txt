@@ -10,3 +10,4 @@ jieba
 openai
 fastapi
 uvicorn
+mcp>=2.0

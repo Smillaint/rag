@@ -12,6 +12,11 @@ secret.txt
 secrets.txt
 *.key
 
+# Cloudflare Tunnel credentials and machine-local configuration
+.bin/
+cloudflared/*
+!cloudflared/config.yml.example
+
 # Generated/local data stores
 data/
 vectorstore/
